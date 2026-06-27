@@ -1,0 +1,245 @@
+name: Tauri Build (reusable)
+
+# Workflow riusabile per build dell'app desktop Tauri v2 (Rust + Vite/React).
+# Centralizza la CI/CD desktop condivisa tra più progetti, analogo a expo-ci per il mobile.
+# Chiamato da thin wrappers nei singoli progetti via:
+#   uses: GabryXnLab/desktop-ci/.github/workflows/tauri-build.yml@main
+#
+# ⚠️ Build NATIVA per OS: Tauri compila per la piattaforma su cui gira il runner.
+#   - linux   → bundle .deb/.AppImage/.rpm (richiede librerie GTK/WebKit installate)
+#   - windows → bundle .msi/.exe NSIS      (richiede toolchain MSVC + WebView2)
+#   - macos   → bundle .dmg/.app           (richiede un host macOS reale + Xcode)
+# Non c'è cross-compilazione: ogni piattaforma selezionata gira sul runner della sua label.
+# I runner sono parametrizzabili (input *_runner): di default puntano a label self-hosted.
+# Per buildare Windows/macOS occorre registrare runner self-hosted con quelle label (o
+# ripuntare le label su runner GitHub-hosted: windows-latest / macos-latest).
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Nome app (es. WarpMobile) — usato per artifact name e notifiche Telegram'
+        required: true
+        type: string
+      platforms:
+        description: 'Piattaforme da buildare, lista separata da virgola: es. "linux,windows,macos" o "linux"'
+        required: true
+        type: string
+      project_dir:
+        description: 'Sottocartella del repo che contiene il progetto Tauri (package.json + src-tauri/)'
+        required: false
+        default: 'desktop'
+        type: string
+      build_debug:
+        description: 'true → build di debug (più veloce, non firmata). false → release (default).'
+        required: false
+        default: false
+        type: boolean
+      has_submodules:
+        description: 'true → checkout con submodules: recursive (serve se il frontend usa @shared o submoduli)'
+        required: false
+        default: false
+        type: boolean
+      install_system_deps:
+        description: 'true → su Linux installa via apt le librerie GTK/WebKit richieste da Tauri (server self-hosted dove non sono già presenti)'
+        required: false
+        default: false
+        type: boolean
+      setup_rust:
+        description: 'true → assicura la toolchain Rust stable via rustup (idempotente). false se il runner ce l’ha già.'
+        required: false
+        default: true
+        type: boolean
+      linux_runner:
+        description: 'runs-on per il job Linux, come JSON array. Default: self-hosted nexus-core.'
+        required: false
+        default: '["self-hosted","nexus-core"]'
+        type: string
+      windows_runner:
+        description: 'runs-on per il job Windows, come JSON array. Default: self-hosted windows.'
+        required: false
+        default: '["self-hosted","windows"]'
+        type: string
+      macos_runner:
+        description: 'runs-on per il job macOS, come JSON array. Default: self-hosted macos.'
+        required: false
+        default: '["self-hosted","macos"]'
+        type: string
+      node_version:
+        description: 'Versione Node.js'
+        required: false
+        default: '22'
+        type: string
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+      # PAT (read-only Contents) per clonare submodule privati in repo diverse.
+      SUBMODULES_TOKEN:
+        required: false
+      # Firma artefatti Tauri updater (facoltativa). Se assenti, build non firmata.
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # SETUP — trasforma l'input `platforms` (stringa CSV) in una matrix JSON.
+  # Ogni riga porta: os logico, runs-on (array), e il glob dei bundle prodotti.
+  # Gira sul runner Linux (server sempre acceso): è solo parsing di una stringa.
+  # ────────────────────────────────────────────────────────────────────────────
+  setup:
+    name: Resolve platforms
+    runs-on: ${{ fromJSON(inputs.linux_runner) }}
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      count: ${{ steps.gen.outputs.count }}
+    steps:
+      - name: Build matrix from platforms input
+        id: gen
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          LINUX_RUNNER: ${{ inputs.linux_runner }}
+          WINDOWS_RUNNER: ${{ inputs.windows_runner }}
+          MACOS_RUNNER: ${{ inputs.macos_runner }}
+        run: |
+          set -euo pipefail
+          # Normalizza: lower-case, virgole/spazi → newline.
+          sel=$(echo "$PLATFORMS" | tr 'A-Z' 'a-z' | tr ', ' '\n\n' | sed '/^$/d' | sort -u)
+          echo "Piattaforme selezionate:"; echo "$sel"
+          entries=""
+          add() { # $1=os $2=runner-json $3=bundle-glob
+            local row
+            row=$(printf '{"os":"%s","runner":%s,"bundle_glob":"%s"}' "$1" "$2" "$3")
+            if [ -z "$entries" ]; then entries="$row"; else entries="$entries,$row"; fi
+          }
+          while read -r p; do
+            case "$p" in
+              linux)   add linux   "$LINUX_RUNNER"   'bundle/{deb,appimage,rpm}/**' ;;
+              windows) add windows "$WINDOWS_RUNNER" 'bundle/{nsis,msi}/**' ;;
+              macos|mac|darwin) add macos "$MACOS_RUNNER" 'bundle/{dmg,macos}/**' ;;
+              *) echo "::warning::piattaforma ignota '$p' ignorata" ;;
+            esac
+          done <<< "$sel"
+          if [ -z "$entries" ]; then
+            echo "::error::Nessuna piattaforma valida in '$PLATFORMS' (attese: linux, windows, macos)"
+            exit 1
+          fi
+          count=$(echo "$entries" | tr ',' '\n' | grep -c '"os"')
+          echo "matrix={\"include\":[$entries]}" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Matrix: {\"include\":[$entries]}"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # BUILD — un job per piattaforma selezionata, sul runner nativo della sua label.
+  # ────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.os }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.project_dir }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.has_submodules && 'recursive' || 'false' }}
+          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      # Toolchain Rust stable (idempotente: no-op se già presente con rustup).
+      - name: Setup Rust
+        if: ${{ inputs.setup_rust == true }}
+        uses: dtolnay/rust-toolchain@stable
+
+      # Librerie di sistema per la WebView Tauri su Linux. Su nexus-core sono già
+      # installate (install_system_deps=false di default). Abilitare su runner freschi.
+      - name: Install Linux system deps (Tauri)
+        if: ${{ matrix.os == 'linux' && inputs.install_system_deps == true }}
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            librsvg2-dev build-essential curl wget file libssl-dev pkg-config
+
+      # Il progetto desktop è npm-based (package-lock.json). `npm ci` = install riproducibile.
+      # `tauri build` lancia da solo beforeBuildCommand (npm run build → tsc + vite build).
+      - name: Install JS dependencies
+        shell: bash
+        run: npm ci
+
+      - name: Tauri build
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ "${{ inputs.build_debug }}" = "true" ]; then
+            npm run tauri -- build --debug
+          else
+            npm run tauri -- build
+          fi
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app_name }}-desktop-${{ matrix.os }}-${{ github.sha }}
+          path: ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/${{ matrix.bundle_glob }}
+          if-no-files-found: warn
+          retention-days: 3
+
+      # Notifica best-effort (non fa fallire il job se Telegram non risponde).
+      - name: Send notification via Telegram
+        if: ${{ always() }}
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APP_NAME: ${{ inputs.app_name }}
+          OS_NAME: ${{ matrix.os }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Skip notifica Telegram (token/chat mancante)"; exit 0
+          fi
+          REL_DIR="src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle"
+          # Primo bundle distribuibile trovato (installer/pacchetto), per OS.
+          FILE=$(find "$REL_DIR" -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" \
+            -o -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.app.tar.gz" \) 2>/dev/null | head -1)
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          ICON="✅"; [ "$JOB_STATUS" = "success" ] || ICON="❌"
+          LINE1="${ICON} ${APP_NAME} desktop \`${OS_NAME}\` — \`${SHORT_SHA}\` (${JOB_STATUS})"
+          LINE2="Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          CAPTION="${LINE1}"$'\n'"${LINE2}"
+
+          # Local Bot API Server (limite ~2 GB) con fallback al cloud (limite 50 MB).
+          TG_LOCAL="${TELEGRAM_API_BASE:-http://localhost:8081}"
+          TG_CLOUD="https://api.telegram.org"
+          if curl -sf -m 5 "${TG_LOCAL}/bot${TELEGRAM_BOT_TOKEN}/getMe" -o /dev/null 2>/dev/null; then
+            TG_API="${TG_LOCAL}/bot${TELEGRAM_BOT_TOKEN}"; MAX_BYTES=2097152000
+          else
+            TG_API="${TG_CLOUD}/bot${TELEGRAM_BOT_TOKEN}"; MAX_BYTES=52428800
+          fi
+
+          BYTES=0; [ -n "$FILE" ] && BYTES=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null || echo 0)
+          if [ "$JOB_STATUS" = "success" ] && [ -n "$FILE" ] && [ "$BYTES" -gt 0 ] && [ "$BYTES" -le "$MAX_BYTES" ]; then
+            HTTP_CODE=$(curl -s -o /tmp/tg_resp.json -w "%{http_code}" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" -F "document=@${FILE}" -F "caption=${CAPTION}" \
+              "${TG_API}/sendDocument" || echo "000")
+          else
+            HTTP_CODE=$(curl -s -o /tmp/tg_resp.json -w "%{http_code}" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" -F "text=${CAPTION}" -F "parse_mode=Markdown" \
+              "${TG_API}/sendMessage" || echo "000")
+          fi
+          [ "$HTTP_CODE" = "200" ] && echo "Notifica Telegram inviata." || {
+            echo "warn: invio Telegram fallito (HTTP ${HTTP_CODE}, build comunque OK)";
+            cat /tmp/tg_resp.json 2>/dev/null || true; }
