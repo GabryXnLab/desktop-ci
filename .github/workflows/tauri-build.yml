@@ -268,8 +268,10 @@ jobs:
             echo "Skip notifica Telegram (token/chat mancante)"; exit 0
           fi
           REL_DIR="src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle"
-          FILE=$(find "$REL_DIR" -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" \
-            -o -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.app.tar.gz" \) 2>/dev/null | head -1)
+          # Tutti i bundle distribuibili prodotti (per Linux sono più formati: .deb/.AppImage/.rpm).
+          # A differenza dell'APK (file unico) qui ne mandiamo UNO per ciascun formato trovato.
+          mapfile -t FILES < <(find "$REL_DIR" -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" \
+            -o -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.app.tar.gz" \) 2>/dev/null | sort)
           SHORT_SHA="${GITHUB_SHA:0:7}"
           ICON="✅"; [ "$JOB_STATUS" = "success" ] || ICON="❌"
           LINE1="${ICON} ${APP_NAME} desktop \`${OS_NAME}\` — \`${SHORT_SHA}\` (${JOB_STATUS})"
@@ -280,21 +282,49 @@ jobs:
           TG_LOCAL="${TELEGRAM_API_BASE:-http://localhost:8081}"
           TG_CLOUD="https://api.telegram.org"
           if curl -sf -m 5 "${TG_LOCAL}/bot${TELEGRAM_BOT_TOKEN}/getMe" -o /dev/null 2>/dev/null; then
-            TG_API="${TG_LOCAL}/bot${TELEGRAM_BOT_TOKEN}"; MAX_BYTES=2097152000
+            TG_API="${TG_LOCAL}/bot${TELEGRAM_BOT_TOKEN}"; MAX_BYTES=2097152000; MAX_LABEL="2 GB (Local Bot API Server)"
           else
-            TG_API="${TG_CLOUD}/bot${TELEGRAM_BOT_TOKEN}"; MAX_BYTES=52428800
+            TG_API="${TG_CLOUD}/bot${TELEGRAM_BOT_TOKEN}"; MAX_BYTES=52428800; MAX_LABEL="50 MB (Bot API cloud)"
           fi
 
-          BYTES=0; [ -n "$FILE" ] && BYTES=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null || echo 0)
-          if [ "$JOB_STATUS" = "success" ] && [ -n "$FILE" ] && [ "$BYTES" -gt 0 ] && [ "$BYTES" -le "$MAX_BYTES" ]; then
-            HTTP_CODE=$(curl -s -o /tmp/tg_resp.json -w "%{http_code}" \
-              -F "chat_id=${TELEGRAM_CHAT_ID}" -F "document=@${FILE}" -F "caption=${CAPTION}" \
-              "${TG_API}/sendDocument" || echo "000")
-          else
-            HTTP_CODE=$(curl -s -o /tmp/tg_resp.json -w "%{http_code}" \
-              -F "chat_id=${TELEGRAM_CHAT_ID}" -F "text=${CAPTION}" -F "parse_mode=Markdown" \
-              "${TG_API}/sendMessage" || echo "000")
+          # Helper invio: $1=text/file, gestisce over-limit con nota (come il pattern APK).
+          send_text() {
+            curl -s -o /tmp/tg_resp.json -w "%{http_code}" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" -F "text=$1" -F "parse_mode=Markdown" \
+              "${TG_API}/sendMessage" || echo "000"
+          }
+          send_file() {
+            curl -s -o /tmp/tg_resp.json -w "%{http_code}" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" -F "document=@$1" -F "caption=$2" \
+              "${TG_API}/sendDocument" || echo "000"
+          }
+
+          report() { # $1=http_code
+            [ "$1" = "200" ] && echo "Notifica Telegram inviata." || {
+              echo "warn: invio Telegram fallito (HTTP $1, build comunque OK, bundle disponibile come artifact)";
+              cat /tmp/tg_resp.json 2>/dev/null || true; echo ""; }
+          }
+
+          # Build fallita o nessun bundle prodotto → solo messaggio di testo col link al run.
+          if [ "$JOB_STATUS" != "success" ] || [ "${#FILES[@]}" -eq 0 ]; then
+            [ "${#FILES[@]}" -eq 0 ] && [ "$JOB_STATUS" = "success" ] && \
+              CAPTION="${CAPTION}"$'\n'"⚠️ Nessun bundle distribuibile trovato in ${REL_DIR}."
+            report "$(send_text "${CAPTION}")"
+            exit 0
           fi
-          [ "$HTTP_CODE" = "200" ] && echo "Notifica Telegram inviata." || {
-            echo "warn: invio Telegram fallito (HTTP ${HTTP_CODE}, build comunque OK)";
-            cat /tmp/tg_resp.json 2>/dev/null || true; }
+
+          # Un invio per ciascun bundle prodotto: sotto soglia → il file; oltre → solo link+nota.
+          for FILE in "${FILES[@]}"; do
+            BYTES=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null || echo 0)
+            MB=$(( BYTES / 1024 / 1024 ))
+            BASENAME=$(basename "$FILE")
+            FCAP="${CAPTION}"$'\n'"📦 \`${BASENAME}\` (${MB} MB)"
+            echo "Bundle: ${FILE} (${MB} MB)"
+            if [ "$BYTES" -gt 0 ] && [ "$BYTES" -le "$MAX_BYTES" ]; then
+              report "$(send_file "$FILE" "$FCAP")"
+            else
+              echo "Bundle ${MB} MB oltre il limite ${MAX_LABEL}: invio solo il link al run."
+              FCAP="${FCAP}"$'\n'"⚠️ ${MB} MB: oltre il limite (${MAX_LABEL}), scaricalo dagli artifact del run."
+              report "$(send_text "$FCAP")"
+            fi
+          done
