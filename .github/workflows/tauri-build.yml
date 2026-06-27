@@ -5,21 +5,22 @@ name: Tauri Build (reusable)
 # Chiamato da thin wrappers nei singoli progetti via:
 #   uses: GabryXnLab/desktop-ci/.github/workflows/tauri-build.yml@main
 #
-# ⚠️ Build NATIVA per OS: Tauri compila per la piattaforma su cui gira il runner.
-#   - linux   → bundle .deb/.AppImage/.rpm (richiede librerie GTK/WebKit)
-#   - windows → bundle .msi/.exe NSIS      (richiede toolchain MSVC + WebView2)
-#   - macos   → bundle .dmg/.app           (richiede un host macOS reale + Xcode)
-# Non c'è cross-compilazione.
+# ⚠️ Build NATIVA per OS *e architettura*: Tauri compila per la piattaforma del runner,
+# non cross-compila. Target supportati (input `platforms`, CSV):
+#   - linux-x64    → .deb/.AppImage/.rpm  (x86_64) — richiede GTK/WebKit
+#   - linux-arm64  → .deb/.AppImage/.rpm  (aarch64) — richiede GTK/WebKit
+#   - windows      → .msi/.exe NSIS       (x86_64) — toolchain MSVC + WebView2
+#   - macos        → .dmg/.app            (Apple Silicon) — host macOS + Xcode
+#   (alias accettati: linux→linux-arm64, x64/x86_64→linux-x64, win→windows, mac/darwin→macos)
 #
 # Scelta del runner (`runner_type`):
-#   - self-hosted : tutte le piattaforme girano sui runner self-hosted. L'ambiente
-#                   self-hosted è Linux → Windows/macOS sono INCOMPATIBILI: se selezionate
-#                   il job `setup` FALLISCE con un errore esplicito e NON parte alcuna build.
-#                   (A meno di fornire un override *_runner per quella piattaforma.)
-#   - github      : ogni piattaforma gira sul runner GitHub-hosted nativo
-#                   (linux→ubuntu-latest, windows→windows-latest, macos→macos-latest).
-# Gli input *_runner permettono di forzare un runs-on specifico per piattaforma
-# (es. un runner self-hosted Windows/macOS dedicato), bypassando il default.
+#   - self-hosted : l'ambiente self-hosted di default è Linux ARM64 → solo `linux-arm64` è
+#                   nativamente compatibile. Gli altri target (linux-x64/windows/macos) senza
+#                   un override *_runner dedicato fanno FALLIRE il job `setup` con errore
+#                   esplicito → nessuna build parte.
+#   - github      : ogni target sul runner GitHub-hosted nativo
+#                   (linux-x64→ubuntu-latest, linux-arm64→ubuntu-24.04-arm,
+#                    windows→windows-latest, macos→macos-latest).
 
 on:
   workflow_call:
@@ -29,7 +30,7 @@ on:
         required: true
         type: string
       platforms:
-        description: 'Piattaforme da buildare, lista separata da virgola: es. "linux,windows,macos" o "linux"'
+        description: 'Target da buildare, CSV: es. "linux-x64,linux-arm64,windows,macos" (1 o più)'
         required: true
         type: string
       runner_type:
@@ -53,7 +54,7 @@ on:
         default: false
         type: boolean
       install_system_deps:
-        description: 'true → su Linux forza apt delle librerie GTK/WebKit. NB: con runner_type=github su Linux vengono installate comunque (ubuntu-latest non le ha).'
+        description: 'true → su Linux forza apt delle librerie GTK/WebKit. NB: con runner_type=github su Linux vengono installate comunque (i runner GitHub non le hanno).'
         required: false
         default: false
         type: boolean
@@ -62,8 +63,18 @@ on:
         required: false
         default: true
         type: boolean
-      linux_runner:
-        description: 'Override runs-on per Linux (JSON array, es. ["self-hosted","x86"]). Vuoto = default dal runner_type.'
+      selfhosted_linux_runner:
+        description: 'runs-on per linux-arm64 self-hosted quando runner_type=self-hosted e nessun override (JSON array).'
+        required: false
+        default: '["self-hosted","nexus-core"]'
+        type: string
+      linux_x64_runner:
+        description: 'Override runs-on per linux-x64 (JSON array). Vuoto = default dal runner_type. Su self-hosted SENZA override → errore.'
+        required: false
+        default: ''
+        type: string
+      linux_arm64_runner:
+        description: 'Override runs-on per linux-arm64 (JSON array). Vuoto = default dal runner_type.'
         required: false
         default: ''
         type: string
@@ -76,11 +87,6 @@ on:
         description: 'Override runs-on per macOS (JSON array). Vuoto = default dal runner_type. Su self-hosted SENZA override → errore.'
         required: false
         default: ''
-        type: string
-      selfhosted_linux_runner:
-        description: 'runs-on per Linux self-hosted quando runner_type=self-hosted e nessun override (JSON array).'
-        required: false
-        default: '["self-hosted","nexus-core"]'
         type: string
       node_version:
         description: 'Versione Node.js'
@@ -103,14 +109,14 @@ on:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # SETUP / VALIDAZIONE — trasforma `platforms` (CSV) + `runner_type` in una matrix.
-  # Qui avviene il CONTROLLO DI COMPATIBILITÀ: se runner_type=self-hosted e si chiede
-  # una piattaforma non compatibile (windows/macos, senza override dedicato), il job
-  # ESCE CON ERRORE → nessuna build parte. Gira sempre su GitHub-hosted (ubuntu-latest):
-  # leggero e disponibile anche quando il self-hosted è offline o non compatibile.
+  # SETUP / VALIDAZIONE — `platforms` (CSV) + `runner_type` → matrix.
+  # CONTROLLO DI COMPATIBILITÀ: con runner_type=self-hosted i target non compatibili
+  # con l'ambiente self-hosted (Linux ARM64) — cioè linux-x64/windows/macos senza
+  # override dedicato — fanno uscire il job con errore → nessuna build parte.
+  # Gira su ubuntu-latest: disponibile anche quando il self-hosted è offline/incompatibile.
   # ────────────────────────────────────────────────────────────────────────────
   setup:
-    name: Resolve & validate platforms
+    name: Resolve & validate targets
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
@@ -120,61 +126,73 @@ jobs:
         env:
           PLATFORMS: ${{ inputs.platforms }}
           RUNNER_TYPE: ${{ inputs.runner_type }}
-          LINUX_OVERRIDE: ${{ inputs.linux_runner }}
+          SELFHOSTED_LINUX: ${{ inputs.selfhosted_linux_runner }}
+          LINUX_X64_OVERRIDE: ${{ inputs.linux_x64_runner }}
+          LINUX_ARM64_OVERRIDE: ${{ inputs.linux_arm64_runner }}
           WINDOWS_OVERRIDE: ${{ inputs.windows_runner }}
           MACOS_OVERRIDE: ${{ inputs.macos_runner }}
-          SELFHOSTED_LINUX: ${{ inputs.selfhosted_linux_runner }}
           INSTALL_SYS_DEPS: ${{ inputs.install_system_deps }}
         run: |
           set -euo pipefail
           if [ "$RUNNER_TYPE" != "self-hosted" ] && [ "$RUNNER_TYPE" != "github" ]; then
             echo "::error::runner_type non valido: '$RUNNER_TYPE' (attesi: self-hosted | github)"; exit 1
           fi
-          sel=$(echo "$PLATFORMS" | tr 'A-Z' 'a-z' | tr ', ' '\n\n' | sed '/^$/d' | sort -u)
-          echo "runner_type=$RUNNER_TYPE"; echo "Piattaforme selezionate:"; echo "$sel"
+          toks=$(echo "$PLATFORMS" | tr 'A-Z' 'a-z' | tr ', ' '\n\n' | sed '/^$/d')
+          echo "runner_type=$RUNNER_TYPE"; echo "Target richiesti:"; echo "$toks"
 
-          entries=""; incompat=""
-          add() { local r; r=$(printf '{"os":"%s","runner":%s,"bundle_glob":"%s","apt":%s}' "$1" "$2" "$3" "$4")
-                  if [ -z "$entries" ]; then entries="$r"; else entries="$entries,$r"; fi; }
+          entries=""; incompat=""; seen=""
+          GLOB_LINUX='bundle/{deb,appimage,rpm}/**'
+          add() { # $1=os $2=arch $3=runner-json $4=glob $5=apt
+            case " $seen " in *" $1-$2 "*) return 0 ;; esac   # dedup target
+            seen="$seen $1-$2"
+            local r; r=$(printf '{"os":"%s","arch":"%s","runner":%s,"bundle_glob":"%s","apt":%s}' "$1" "$2" "$3" "$4" "$5")
+            if [ -z "$entries" ]; then entries="$r"; else entries="$entries,$r"; fi
+          }
 
           while read -r p; do
             case "$p" in
-              linux)
-                glob='bundle/{deb,appimage,rpm}/**'
-                if [ -n "$LINUX_OVERRIDE" ]; then runner="$LINUX_OVERRIDE"; apt="$INSTALL_SYS_DEPS"
-                elif [ "$RUNNER_TYPE" = "github" ]; then runner='["ubuntu-latest"]'; apt=true
-                else runner="$SELFHOSTED_LINUX"; apt="$INSTALL_SYS_DEPS"; fi
-                add linux "$runner" "$glob" "$apt" ;;
-              windows)
-                glob='bundle/{nsis,msi}/**'
-                if [ -n "$WINDOWS_OVERRIDE" ]; then add windows "$WINDOWS_OVERRIDE" "$glob" false
-                elif [ "$RUNNER_TYPE" = "github" ]; then add windows '["windows-latest"]' "$glob" false
-                else incompat="$incompat windows"; fi ;;
-              macos|mac|darwin)
-                glob='bundle/{dmg,macos}/**'
-                if [ -n "$MACOS_OVERRIDE" ]; then add macos "$MACOS_OVERRIDE" "$glob" false
-                elif [ "$RUNNER_TYPE" = "github" ]; then add macos '["macos-latest"]' "$glob" false
-                else incompat="$incompat macos"; fi ;;
-              *) echo "::warning::piattaforma ignota '$p' ignorata" ;;
+              linux-x64|linux_x64|linux-x86_64|linux-amd64|x64|x86_64) target=linux-x64 ;;
+              linux|linux-arm64|linux_arm64|linux-aarch64|arm64|aarch64) target=linux-arm64 ;;
+              windows|win) target=windows ;;
+              macos|mac|darwin) target=macos ;;
+              *) echo "::warning::target ignoto '$p' ignorato"; continue ;;
             esac
-          done <<< "$sel"
+            case "$target" in
+              linux-x64)
+                if [ -n "$LINUX_X64_OVERRIDE" ]; then add linux x64 "$LINUX_X64_OVERRIDE" "$GLOB_LINUX" "$INSTALL_SYS_DEPS"
+                elif [ "$RUNNER_TYPE" = "github" ]; then add linux x64 '["ubuntu-latest"]' "$GLOB_LINUX" true
+                else incompat="$incompat linux-x64"; fi ;;
+              linux-arm64)
+                if [ -n "$LINUX_ARM64_OVERRIDE" ]; then add linux arm64 "$LINUX_ARM64_OVERRIDE" "$GLOB_LINUX" "$INSTALL_SYS_DEPS"
+                elif [ "$RUNNER_TYPE" = "github" ]; then add linux arm64 '["ubuntu-24.04-arm"]' "$GLOB_LINUX" true
+                else add linux arm64 "$SELFHOSTED_LINUX" "$GLOB_LINUX" "$INSTALL_SYS_DEPS"; fi ;;
+              windows)
+                if [ -n "$WINDOWS_OVERRIDE" ]; then add windows x64 "$WINDOWS_OVERRIDE" 'bundle/{nsis,msi}/**' false
+                elif [ "$RUNNER_TYPE" = "github" ]; then add windows x64 '["windows-latest"]' 'bundle/{nsis,msi}/**' false
+                else incompat="$incompat windows"; fi ;;
+              macos)
+                if [ -n "$MACOS_OVERRIDE" ]; then add macos arm64 "$MACOS_OVERRIDE" 'bundle/{dmg,macos}/**' false
+                elif [ "$RUNNER_TYPE" = "github" ]; then add macos arm64 '["macos-latest"]' 'bundle/{dmg,macos}/**' false
+                else incompat="$incompat macos"; fi ;;
+            esac
+          done <<< "$toks"
 
           # ── Controllo compatibilità self-hosted ──────────────────────────────
           if [ -n "$incompat" ]; then
-            echo "::error::runner_type=self-hosted ma le piattaforme [${incompat# }] NON sono compatibili con l'ambiente self-hosted (Linux). Tauri non cross-compila: Windows/macOS richiedono il loro OS. Soluzioni: (1) imposta 'Runner desktop = github' per buildarle sui runner GitHub-hosted; (2) oppure registra un runner self-hosted dedicato e passalo via input *_runner. Workflow interrotto: nessuna build avviata."
+            echo "::error::runner_type=self-hosted ma i target [${incompat# }] NON sono compatibili con l'ambiente self-hosted (Linux ARM64). Tauri non cross-compila: x86_64/Windows/macOS richiedono il loro host. Soluzioni: (1) imposta 'Runner desktop = github' per buildarli sui runner GitHub-hosted; (2) registra un runner self-hosted dedicato e passalo via input *_runner. Workflow interrotto: nessuna build avviata."
             exit 1
           fi
           if [ -z "$entries" ]; then
-            echo "::error::Nessuna piattaforma valida in '$PLATFORMS' (attese: linux, windows, macos)"; exit 1
+            echo "::error::Nessun target valido in '$PLATFORMS' (attesi: linux-x64, linux-arm64, windows, macos)"; exit 1
           fi
           echo "matrix={\"include\":[$entries]}" >> "$GITHUB_OUTPUT"
           echo "Matrix: {\"include\":[$entries]}"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # BUILD — un job per piattaforma compatibile, sul runner nativo risolto da setup.
+  # BUILD — un job per target compatibile, sul runner nativo risolto da setup.
   # ────────────────────────────────────────────────────────────────────────────
   build:
-    name: Build ${{ matrix.os }}
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
     needs: setup
     strategy:
       fail-fast: false
@@ -198,8 +216,8 @@ jobs:
         if: ${{ inputs.setup_rust == true }}
         uses: dtolnay/rust-toolchain@stable
 
-      # Librerie di sistema per la WebView Tauri su Linux. Necessarie su ubuntu-latest
-      # (GitHub-hosted) e sui runner self-hosted freschi. matrix.apt è calcolato in setup.
+      # Librerie di sistema per la WebView Tauri su Linux. Necessarie sui runner
+      # GitHub-hosted e sui self-hosted freschi. matrix.apt è calcolato in setup.
       - name: Install Linux system deps (Tauri)
         if: ${{ matrix.os == 'linux' && matrix.apt == true }}
         shell: bash
@@ -230,7 +248,7 @@ jobs:
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.app_name }}-desktop-${{ matrix.os }}-${{ github.sha }}
+          name: ${{ inputs.app_name }}-desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ github.sha }}
           path: ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/${{ matrix.bundle_glob }}
           if-no-files-found: warn
           retention-days: 3
@@ -243,7 +261,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           APP_NAME: ${{ inputs.app_name }}
-          OS_NAME: ${{ matrix.os }}
+          OS_NAME: ${{ matrix.os }}-${{ matrix.arch }}
           JOB_STATUS: ${{ job.status }}
         run: |
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then

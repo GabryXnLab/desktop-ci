@@ -10,29 +10,32 @@ I progetti richiamano `tauri-build.yml` come reusable via `uses: GabryXnLab/desk
 per SHA lato consumatori → una modifica rotta qui rompe tutti i progetti.
 → Input **retrocompatibili** (nuovi con `default`, mai rimuovere/rinominare). Validare lo YAML.
 
-## Architettura: build nativa per OS, niente cross-compilazione
+## Architettura: build nativa per OS *e arch*, niente cross-compilazione
 
-Tauri compila per la piattaforma del runner. `platforms` (CSV) → job `setup` che genera una
-**matrix JSON** (`{os, runner, bundle_glob}`), poi `build` esegue un job per riga sul runner
-nativo (`runs-on: matrix.runner`).
+Tauri compila per la piattaforma del runner. `platforms` (CSV di target) → job `setup` che genera
+una **matrix JSON** (`{os, arch, runner, bundle_glob, apt}`), poi `build` esegue un job per riga
+sul runner nativo (`runs-on: matrix.runner`). Target: `linux-x64`, `linux-arm64`, `windows`,
+`macos` (alias: `linux`→`linux-arm64`, `x64`/`x86_64`→`linux-x64`, `win`→`windows`, `mac`/`darwin`→`macos`).
 
-- **linux** → `.deb`/`.AppImage`/`.rpm`. Serve GTK/WebKit (`libwebkit2gtk-4.1-dev`,
-  `libgtk-3-dev`, `libsoup-3.0-dev`, `librsvg2-dev`). Su `nexus-core` già presenti
-  (`install_system_deps=false`). Build aarch64 sul runner ARM64.
-- **windows** → `.msi`/NSIS `.exe`. Serve toolchain MSVC + WebView2: **runner Windows**.
-- **macos** → `.dmg`/`.app`. Serve **host macOS** + Xcode CLT: NON compilabile da Linux.
+- **linux-x64 / linux-arm64** → `.deb`/`.AppImage`/`.rpm`. Serve GTK/WebKit
+  (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libsoup-3.0-dev`, `librsvg2-dev`). `matrix.apt`
+  le installa sui runner GitHub-hosted e sui self-hosted freschi.
+- **windows** → `.msi`/NSIS `.exe` (x86_64). Serve toolchain MSVC + WebView2: **runner Windows**.
+- **macos** → `.dmg`/`.app` (Apple Silicon). Serve **host macOS** + Xcode CLT: NON compilabile da Linux.
 
 ### `runner_type` + validazione compatibilità (job `setup`)
 
 `runner_type`: `self-hosted` (default) | `github`.
-- **github** → linux→`ubuntu-latest`, windows→`windows-latest`, macos→`macos-latest` (apt Linux automatico).
-- **self-hosted** → l'ambiente è Linux: solo `linux` è compatibile (runner `selfhosted_linux_runner`,
-  default `nexus-core`). Se si chiede **windows/macos** senza override, il job `setup`
-  **esce con `exit 1`** (errore esplicito) → la dipendenza `needs: setup` blocca `build`:
-  nessuna build parte. È il modo standard di "non avviare il workflow" su combinazioni invalide
-  (workflow_dispatch non valida le combinazioni di input prima del dispatch).
-- Override `linux_runner`/`windows_runner`/`macos_runner` (JSON array, default `''`) **scavalcano**
-  il default del `runner_type` (es. un runner self-hosted Windows/macOS dedicato → bypassa l'errore).
+- **github** → linux-x64→`ubuntu-latest`, linux-arm64→`ubuntu-24.04-arm`, windows→`windows-latest`,
+  macos→`macos-latest` (apt Linux automatico).
+- **self-hosted** → l'ambiente di default è **Linux ARM64**: solo `linux-arm64` è compatibile
+  (runner `selfhosted_linux_runner`, default `nexus-core`). Se si chiede **linux-x64/windows/macos**
+  senza override, il job `setup` **esce con `exit 1`** (errore esplicito) → la dipendenza
+  `needs: setup` blocca `build`: nessuna build parte. È il modo standard di "non avviare il
+  workflow" su combinazioni invalide (workflow_dispatch non valida gli input prima del dispatch).
+- Override `linux_x64_runner`/`linux_arm64_runner`/`windows_runner`/`macos_runner` (JSON array,
+  default `''`) **scavalcano** il default del `runner_type` (es. un runner self-hosted x86_64 o
+  Windows/macOS dedicato → bypassa l'errore).
 
 La matrix (`{os, runner, bundle_glob, apt}`) è generata in `setup` e consumata da `build`
 (`runs-on: matrix.runner`). `setup` gira su `ubuntu-latest` (sempre disponibile, anche se il

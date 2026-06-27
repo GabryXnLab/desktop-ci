@@ -12,8 +12,8 @@ jobs:
     uses: GabryXnLab/desktop-ci/.github/workflows/tauri-build.yml@main
     with:
       app_name: WarpMobile
-      platforms: linux,windows,macos   # scegli quali buildare
-      runner_type: github              # self-hosted | github
+      platforms: linux-x64,linux-arm64,windows,macos   # scegli quali buildare
+      runner_type: github                              # self-hosted | github
       project_dir: desktop
       has_submodules: true
     secrets:
@@ -27,11 +27,14 @@ jobs:
 Builda l'app Tauri **in modo nativo per ogni piattaforma selezionata**. Non c'è
 cross-compilazione: ogni piattaforma gira sul runner della sua label.
 
-| Piattaforma | Bundle prodotti        | Requisiti runner                                  |
-|-------------|------------------------|---------------------------------------------------|
-| `linux`     | `.deb` `.AppImage` `.rpm` | Librerie GTK/WebKit (`libwebkit2gtk-4.1-dev` …) |
-| `windows`   | `.msi` `.exe` (NSIS)   | Toolchain MSVC + WebView2                          |
-| `macos`     | `.dmg` `.app`          | **Host macOS reale** + Xcode CLT                  |
+| Target        | Bundle prodotti          | Requisiti runner                                  |
+|---------------|--------------------------|---------------------------------------------------|
+| `linux-x64`   | `.deb` `.AppImage` `.rpm` (x86_64) | Linux x86_64 + GTK/WebKit               |
+| `linux-arm64` | `.deb` `.AppImage` `.rpm` (aarch64) | Linux ARM64 + GTK/WebKit               |
+| `windows`     | `.msi` `.exe` (NSIS)     | Windows + MSVC + WebView2                          |
+| `macos`       | `.dmg` `.app`            | **Host macOS reale** + Xcode CLT                  |
+
+Alias accettati: `linux`→`linux-arm64`, `x64`/`x86_64`→`linux-x64`, `win`→`windows`, `mac`/`darwin`→`macos`.
 
 > ⚠️ **macOS richiede un host macOS**: non è compilabile su un server Linux.
 > Allo stesso modo Windows richiede l'ambiente Windows.
@@ -40,8 +43,8 @@ cross-compilazione: ogni piattaforma gira sul runner della sua label.
 
 | `runner_type` | Comportamento |
 |---------------|---------------|
-| `self-hosted` (default) | Tutte le piattaforme sui runner self-hosted. L'ambiente self-hosted è **Linux** → se selezioni **windows/macos** il job `setup` **fallisce con errore esplicito e nessuna build parte** (a meno di passare un override `*_runner` dedicato). |
-| `github`      | Ogni piattaforma sul runner GitHub-hosted nativo: `linux→ubuntu-latest`, `windows→windows-latest`, `macos→macos-latest`. Su Linux le librerie GTK/WebKit sono installate automaticamente. |
+| `self-hosted` (default) | Tutto sui runner self-hosted. L'ambiente di default è **Linux ARM64** → solo `linux-arm64` è compatibile; **`linux-x64`/`windows`/`macos`** fanno **fallire `setup` con errore esplicito e nessuna build parte** (a meno di un override `*_runner` dedicato). |
+| `github`      | Ogni target sul runner GitHub-hosted nativo: `linux-x64→ubuntu-latest`, `linux-arm64→ubuntu-24.04-arm`, `windows→windows-latest`, `macos→macos-latest`. Su Linux le librerie GTK/WebKit sono installate automaticamente. |
 
 Gli input `linux_runner`/`windows_runner`/`macos_runner` (JSON array) **forzano** il `runs-on`
 di una piattaforma, scavalcando il default del `runner_type` (es. un runner self-hosted Windows).
@@ -51,15 +54,15 @@ di una piattaforma, scavalcando il default del `runner_type` (es. un runner self
 | Input                 | Default                         | Note |
 |-----------------------|---------------------------------|------|
 | `app_name`            | — (richiesto)                   | Nome per artifact e notifiche |
-| `platforms`           | — (richiesto)                   | CSV: `linux,windows,macos` (1, 2 o 3) |
+| `platforms`           | — (richiesto)                   | CSV: `linux-x64,linux-arm64,windows,macos` |
 | `runner_type`         | `self-hosted`                   | `self-hosted` \| `github` (vedi tabella sopra) |
 | `project_dir`         | `desktop`                       | Cartella con `package.json` + `src-tauri/` |
 | `build_debug`         | `false`                         | `true` = build debug |
 | `has_submodules`      | `false`                         | `true` → checkout `--recursive` |
 | `install_system_deps` | `false`                         | `true` → apt delle libs GTK/WebKit (Linux); su `github` Linux è automatico |
 | `setup_rust`          | `true`                          | Assicura Rust stable via rustup |
-| `selfhosted_linux_runner` | `["self-hosted","nexus-core"]` | `runs-on` Linux quando `runner_type=self-hosted` |
-| `linux_runner` / `windows_runner` / `macos_runner` | `''` | Override `runs-on` (JSON array); scavalca il default del `runner_type` |
+| `selfhosted_linux_runner` | `["self-hosted","nexus-core"]` | `runs-on` per `linux-arm64` self-hosted |
+| `linux_x64_runner` / `linux_arm64_runner` / `windows_runner` / `macos_runner` | `''` | Override `runs-on` (JSON array); scavalca il default del `runner_type` |
 
 ### Secret (tutti opzionali)
 
