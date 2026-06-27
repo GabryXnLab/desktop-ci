@@ -22,9 +22,21 @@ nativo (`runs-on: matrix.runner`).
 - **windows** → `.msi`/NSIS `.exe`. Serve toolchain MSVC + WebView2: **runner Windows**.
 - **macos** → `.dmg`/`.app`. Serve **host macOS** + Xcode CLT: NON compilabile da Linux.
 
-I runner sono parametrizzati (`linux_runner`/`windows_runner`/`macos_runner`, JSON array)
-con default a label self-hosted. Per Windows/macOS registrare runner self-hosted con quelle
-label, oppure ripuntarle su `windows-latest`/`macos-latest` (GitHub-hosted) dal wrapper.
+### `runner_type` + validazione compatibilità (job `setup`)
+
+`runner_type`: `self-hosted` (default) | `github`.
+- **github** → linux→`ubuntu-latest`, windows→`windows-latest`, macos→`macos-latest` (apt Linux automatico).
+- **self-hosted** → l'ambiente è Linux: solo `linux` è compatibile (runner `selfhosted_linux_runner`,
+  default `nexus-core`). Se si chiede **windows/macos** senza override, il job `setup`
+  **esce con `exit 1`** (errore esplicito) → la dipendenza `needs: setup` blocca `build`:
+  nessuna build parte. È il modo standard di "non avviare il workflow" su combinazioni invalide
+  (workflow_dispatch non valida le combinazioni di input prima del dispatch).
+- Override `linux_runner`/`windows_runner`/`macos_runner` (JSON array, default `''`) **scavalcano**
+  il default del `runner_type` (es. un runner self-hosted Windows/macOS dedicato → bypassa l'errore).
+
+La matrix (`{os, runner, bundle_glob, apt}`) è generata in `setup` e consumata da `build`
+(`runs-on: matrix.runner`). `setup` gira su `ubuntu-latest` (sempre disponibile, anche se il
+self-hosted è offline/incompatibile).
 
 ## Convenzioni (allineate a expo-ci)
 

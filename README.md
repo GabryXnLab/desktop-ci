@@ -13,6 +13,7 @@ jobs:
     with:
       app_name: WarpMobile
       platforms: linux,windows,macos   # scegli quali buildare
+      runner_type: github              # self-hosted | github
       project_dir: desktop
       has_submodules: true
     secrets:
@@ -33,8 +34,17 @@ cross-compilazione: ogni piattaforma gira sul runner della sua label.
 | `macos`     | `.dmg` `.app`          | **Host macOS reale** + Xcode CLT                  |
 
 > ⚠️ **macOS richiede un host macOS**: non è compilabile su un server Linux.
-> Allo stesso modo Windows richiede l'ambiente Windows. Registra runner self-hosted
-> con le label appropriate, oppure ripunta gli input `*_runner` su runner GitHub-hosted.
+> Allo stesso modo Windows richiede l'ambiente Windows.
+
+### Scelta del runner (`runner_type`)
+
+| `runner_type` | Comportamento |
+|---------------|---------------|
+| `self-hosted` (default) | Tutte le piattaforme sui runner self-hosted. L'ambiente self-hosted è **Linux** → se selezioni **windows/macos** il job `setup` **fallisce con errore esplicito e nessuna build parte** (a meno di passare un override `*_runner` dedicato). |
+| `github`      | Ogni piattaforma sul runner GitHub-hosted nativo: `linux→ubuntu-latest`, `windows→windows-latest`, `macos→macos-latest`. Su Linux le librerie GTK/WebKit sono installate automaticamente. |
+
+Gli input `linux_runner`/`windows_runner`/`macos_runner` (JSON array) **forzano** il `runs-on`
+di una piattaforma, scavalcando il default del `runner_type` (es. un runner self-hosted Windows).
 
 ### Input principali
 
@@ -42,14 +52,14 @@ cross-compilazione: ogni piattaforma gira sul runner della sua label.
 |-----------------------|---------------------------------|------|
 | `app_name`            | — (richiesto)                   | Nome per artifact e notifiche |
 | `platforms`           | — (richiesto)                   | CSV: `linux,windows,macos` (1, 2 o 3) |
+| `runner_type`         | `self-hosted`                   | `self-hosted` \| `github` (vedi tabella sopra) |
 | `project_dir`         | `desktop`                       | Cartella con `package.json` + `src-tauri/` |
 | `build_debug`         | `false`                         | `true` = build debug |
 | `has_submodules`      | `false`                         | `true` → checkout `--recursive` |
-| `install_system_deps` | `false`                         | `true` → apt delle libs GTK/WebKit (Linux) |
+| `install_system_deps` | `false`                         | `true` → apt delle libs GTK/WebKit (Linux); su `github` Linux è automatico |
 | `setup_rust`          | `true`                          | Assicura Rust stable via rustup |
-| `linux_runner`        | `["self-hosted","nexus-core"]`  | `runs-on` come JSON array |
-| `windows_runner`      | `["self-hosted","windows"]`     | idem |
-| `macos_runner`        | `["self-hosted","macos"]`       | idem |
+| `selfhosted_linux_runner` | `["self-hosted","nexus-core"]` | `runs-on` Linux quando `runner_type=self-hosted` |
+| `linux_runner` / `windows_runner` / `macos_runner` | `''` | Override `runs-on` (JSON array); scavalca il default del `runner_type` |
 
 ### Secret (tutti opzionali)
 

@@ -6,13 +6,20 @@ name: Tauri Build (reusable)
 #   uses: GabryXnLab/desktop-ci/.github/workflows/tauri-build.yml@main
 #
 # ⚠️ Build NATIVA per OS: Tauri compila per la piattaforma su cui gira il runner.
-#   - linux   → bundle .deb/.AppImage/.rpm (richiede librerie GTK/WebKit installate)
+#   - linux   → bundle .deb/.AppImage/.rpm (richiede librerie GTK/WebKit)
 #   - windows → bundle .msi/.exe NSIS      (richiede toolchain MSVC + WebView2)
 #   - macos   → bundle .dmg/.app           (richiede un host macOS reale + Xcode)
-# Non c'è cross-compilazione: ogni piattaforma selezionata gira sul runner della sua label.
-# I runner sono parametrizzabili (input *_runner): di default puntano a label self-hosted.
-# Per buildare Windows/macOS occorre registrare runner self-hosted con quelle label (o
-# ripuntare le label su runner GitHub-hosted: windows-latest / macos-latest).
+# Non c'è cross-compilazione.
+#
+# Scelta del runner (`runner_type`):
+#   - self-hosted : tutte le piattaforme girano sui runner self-hosted. L'ambiente
+#                   self-hosted è Linux → Windows/macOS sono INCOMPATIBILI: se selezionate
+#                   il job `setup` FALLISCE con un errore esplicito e NON parte alcuna build.
+#                   (A meno di fornire un override *_runner per quella piattaforma.)
+#   - github      : ogni piattaforma gira sul runner GitHub-hosted nativo
+#                   (linux→ubuntu-latest, windows→windows-latest, macos→macos-latest).
+# Gli input *_runner permettono di forzare un runs-on specifico per piattaforma
+# (es. un runner self-hosted Windows/macOS dedicato), bypassando il default.
 
 on:
   workflow_call:
@@ -24,6 +31,11 @@ on:
       platforms:
         description: 'Piattaforme da buildare, lista separata da virgola: es. "linux,windows,macos" o "linux"'
         required: true
+        type: string
+      runner_type:
+        description: 'self-hosted (runner propri) | github (runner GitHub-hosted)'
+        required: false
+        default: 'self-hosted'
         type: string
       project_dir:
         description: 'Sottocartella del repo che contiene il progetto Tauri (package.json + src-tauri/)'
@@ -41,7 +53,7 @@ on:
         default: false
         type: boolean
       install_system_deps:
-        description: 'true → su Linux installa via apt le librerie GTK/WebKit richieste da Tauri (server self-hosted dove non sono già presenti)'
+        description: 'true → su Linux forza apt delle librerie GTK/WebKit. NB: con runner_type=github su Linux vengono installate comunque (ubuntu-latest non le ha).'
         required: false
         default: false
         type: boolean
@@ -51,19 +63,24 @@ on:
         default: true
         type: boolean
       linux_runner:
-        description: 'runs-on per il job Linux, come JSON array. Default: self-hosted nexus-core.'
+        description: 'Override runs-on per Linux (JSON array, es. ["self-hosted","x86"]). Vuoto = default dal runner_type.'
         required: false
-        default: '["self-hosted","nexus-core"]'
+        default: ''
         type: string
       windows_runner:
-        description: 'runs-on per il job Windows, come JSON array. Default: self-hosted windows.'
+        description: 'Override runs-on per Windows (JSON array). Vuoto = default dal runner_type. Su self-hosted SENZA override → errore.'
         required: false
-        default: '["self-hosted","windows"]'
+        default: ''
         type: string
       macos_runner:
-        description: 'runs-on per il job macOS, come JSON array. Default: self-hosted macos.'
+        description: 'Override runs-on per macOS (JSON array). Vuoto = default dal runner_type. Su self-hosted SENZA override → errore.'
         required: false
-        default: '["self-hosted","macos"]'
+        default: ''
+        type: string
+      selfhosted_linux_runner:
+        description: 'runs-on per Linux self-hosted quando runner_type=self-hosted e nessun override (JSON array).'
+        required: false
+        default: '["self-hosted","nexus-core"]'
         type: string
       node_version:
         description: 'Versione Node.js'
@@ -86,54 +103,75 @@ on:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # SETUP — trasforma l'input `platforms` (stringa CSV) in una matrix JSON.
-  # Ogni riga porta: os logico, runs-on (array), e il glob dei bundle prodotti.
-  # Gira sul runner Linux (server sempre acceso): è solo parsing di una stringa.
+  # SETUP / VALIDAZIONE — trasforma `platforms` (CSV) + `runner_type` in una matrix.
+  # Qui avviene il CONTROLLO DI COMPATIBILITÀ: se runner_type=self-hosted e si chiede
+  # una piattaforma non compatibile (windows/macos, senza override dedicato), il job
+  # ESCE CON ERRORE → nessuna build parte. Gira sempre su GitHub-hosted (ubuntu-latest):
+  # leggero e disponibile anche quando il self-hosted è offline o non compatibile.
   # ────────────────────────────────────────────────────────────────────────────
   setup:
-    name: Resolve platforms
-    runs-on: ${{ fromJSON(inputs.linux_runner) }}
+    name: Resolve & validate platforms
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
-      count: ${{ steps.gen.outputs.count }}
     steps:
-      - name: Build matrix from platforms input
+      - name: Build & validate matrix
         id: gen
         env:
           PLATFORMS: ${{ inputs.platforms }}
-          LINUX_RUNNER: ${{ inputs.linux_runner }}
-          WINDOWS_RUNNER: ${{ inputs.windows_runner }}
-          MACOS_RUNNER: ${{ inputs.macos_runner }}
+          RUNNER_TYPE: ${{ inputs.runner_type }}
+          LINUX_OVERRIDE: ${{ inputs.linux_runner }}
+          WINDOWS_OVERRIDE: ${{ inputs.windows_runner }}
+          MACOS_OVERRIDE: ${{ inputs.macos_runner }}
+          SELFHOSTED_LINUX: ${{ inputs.selfhosted_linux_runner }}
+          INSTALL_SYS_DEPS: ${{ inputs.install_system_deps }}
         run: |
           set -euo pipefail
-          # Normalizza: lower-case, virgole/spazi → newline.
+          if [ "$RUNNER_TYPE" != "self-hosted" ] && [ "$RUNNER_TYPE" != "github" ]; then
+            echo "::error::runner_type non valido: '$RUNNER_TYPE' (attesi: self-hosted | github)"; exit 1
+          fi
           sel=$(echo "$PLATFORMS" | tr 'A-Z' 'a-z' | tr ', ' '\n\n' | sed '/^$/d' | sort -u)
-          echo "Piattaforme selezionate:"; echo "$sel"
-          entries=""
-          add() { # $1=os $2=runner-json $3=bundle-glob
-            local row
-            row=$(printf '{"os":"%s","runner":%s,"bundle_glob":"%s"}' "$1" "$2" "$3")
-            if [ -z "$entries" ]; then entries="$row"; else entries="$entries,$row"; fi
-          }
+          echo "runner_type=$RUNNER_TYPE"; echo "Piattaforme selezionate:"; echo "$sel"
+
+          entries=""; incompat=""
+          add() { local r; r=$(printf '{"os":"%s","runner":%s,"bundle_glob":"%s","apt":%s}' "$1" "$2" "$3" "$4")
+                  if [ -z "$entries" ]; then entries="$r"; else entries="$entries,$r"; fi; }
+
           while read -r p; do
             case "$p" in
-              linux)   add linux   "$LINUX_RUNNER"   'bundle/{deb,appimage,rpm}/**' ;;
-              windows) add windows "$WINDOWS_RUNNER" 'bundle/{nsis,msi}/**' ;;
-              macos|mac|darwin) add macos "$MACOS_RUNNER" 'bundle/{dmg,macos}/**' ;;
+              linux)
+                glob='bundle/{deb,appimage,rpm}/**'
+                if [ -n "$LINUX_OVERRIDE" ]; then runner="$LINUX_OVERRIDE"; apt="$INSTALL_SYS_DEPS"
+                elif [ "$RUNNER_TYPE" = "github" ]; then runner='["ubuntu-latest"]'; apt=true
+                else runner="$SELFHOSTED_LINUX"; apt="$INSTALL_SYS_DEPS"; fi
+                add linux "$runner" "$glob" "$apt" ;;
+              windows)
+                glob='bundle/{nsis,msi}/**'
+                if [ -n "$WINDOWS_OVERRIDE" ]; then add windows "$WINDOWS_OVERRIDE" "$glob" false
+                elif [ "$RUNNER_TYPE" = "github" ]; then add windows '["windows-latest"]' "$glob" false
+                else incompat="$incompat windows"; fi ;;
+              macos|mac|darwin)
+                glob='bundle/{dmg,macos}/**'
+                if [ -n "$MACOS_OVERRIDE" ]; then add macos "$MACOS_OVERRIDE" "$glob" false
+                elif [ "$RUNNER_TYPE" = "github" ]; then add macos '["macos-latest"]' "$glob" false
+                else incompat="$incompat macos"; fi ;;
               *) echo "::warning::piattaforma ignota '$p' ignorata" ;;
             esac
           done <<< "$sel"
-          if [ -z "$entries" ]; then
-            echo "::error::Nessuna piattaforma valida in '$PLATFORMS' (attese: linux, windows, macos)"
+
+          # ── Controllo compatibilità self-hosted ──────────────────────────────
+          if [ -n "$incompat" ]; then
+            echo "::error::runner_type=self-hosted ma le piattaforme [${incompat# }] NON sono compatibili con l'ambiente self-hosted (Linux). Tauri non cross-compila: Windows/macOS richiedono il loro OS. Soluzioni: (1) imposta 'Runner desktop = github' per buildarle sui runner GitHub-hosted; (2) oppure registra un runner self-hosted dedicato e passalo via input *_runner. Workflow interrotto: nessuna build avviata."
             exit 1
           fi
-          count=$(echo "$entries" | tr ',' '\n' | grep -c '"os"')
+          if [ -z "$entries" ]; then
+            echo "::error::Nessuna piattaforma valida in '$PLATFORMS' (attese: linux, windows, macos)"; exit 1
+          fi
           echo "matrix={\"include\":[$entries]}" >> "$GITHUB_OUTPUT"
-          echo "count=$count" >> "$GITHUB_OUTPUT"
           echo "Matrix: {\"include\":[$entries]}"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # BUILD — un job per piattaforma selezionata, sul runner nativo della sua label.
+  # BUILD — un job per piattaforma compatibile, sul runner nativo risolto da setup.
   # ────────────────────────────────────────────────────────────────────────────
   build:
     name: Build ${{ matrix.os }}
@@ -160,10 +198,10 @@ jobs:
         if: ${{ inputs.setup_rust == true }}
         uses: dtolnay/rust-toolchain@stable
 
-      # Librerie di sistema per la WebView Tauri su Linux. Su nexus-core sono già
-      # installate (install_system_deps=false di default). Abilitare su runner freschi.
+      # Librerie di sistema per la WebView Tauri su Linux. Necessarie su ubuntu-latest
+      # (GitHub-hosted) e sui runner self-hosted freschi. matrix.apt è calcolato in setup.
       - name: Install Linux system deps (Tauri)
-        if: ${{ matrix.os == 'linux' && inputs.install_system_deps == true }}
+        if: ${{ matrix.os == 'linux' && matrix.apt == true }}
         shell: bash
         run: |
           sudo apt-get update
@@ -212,7 +250,6 @@ jobs:
             echo "Skip notifica Telegram (token/chat mancante)"; exit 0
           fi
           REL_DIR="src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle"
-          # Primo bundle distribuibile trovato (installer/pacchetto), per OS.
           FILE=$(find "$REL_DIR" -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" \
             -o -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.app.tar.gz" \) 2>/dev/null | head -1)
           SHORT_SHA="${GITHUB_SHA:0:7}"
