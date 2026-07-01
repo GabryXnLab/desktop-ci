@@ -141,7 +141,11 @@ jobs:
           echo "runner_type=$RUNNER_TYPE"; echo "Target richiesti:"; echo "$toks"
 
           entries=""; incompat=""; seen=""
-          GLOB_LINUX='bundle/{deb,appimage,rpm}/**'
+          # NB: niente brace-expansion ({a,b,c}) nel glob — actions/upload-artifact@v4
+          # usa @actions/glob (minimatch senza brace expansion): un pattern con {..} non
+          # fa match con nessun file (fallisce silenziosamente, "No files were found").
+          # "bundle/**" cattura ricorsivamente tutti i formati sotto la cartella bundle.
+          GLOB_LINUX='bundle/**'
           add() { # $1=os $2=arch $3=runner-json $4=glob $5=apt
             case " $seen " in *" $1-$2 "*) return 0 ;; esac   # dedup target
             seen="$seen $1-$2"
@@ -167,12 +171,12 @@ jobs:
                 elif [ "$RUNNER_TYPE" = "github" ]; then add linux arm64 '["ubuntu-24.04-arm"]' "$GLOB_LINUX" true
                 else add linux arm64 "$SELFHOSTED_LINUX" "$GLOB_LINUX" "$INSTALL_SYS_DEPS"; fi ;;
               windows)
-                if [ -n "$WINDOWS_OVERRIDE" ]; then add windows x64 "$WINDOWS_OVERRIDE" 'bundle/{nsis,msi}/**' false
-                elif [ "$RUNNER_TYPE" = "github" ]; then add windows x64 '["windows-latest"]' 'bundle/{nsis,msi}/**' false
+                if [ -n "$WINDOWS_OVERRIDE" ]; then add windows x64 "$WINDOWS_OVERRIDE" 'bundle/**' false
+                elif [ "$RUNNER_TYPE" = "github" ]; then add windows x64 '["windows-latest"]' 'bundle/**' false
                 else incompat="$incompat windows"; fi ;;
               macos)
-                if [ -n "$MACOS_OVERRIDE" ]; then add macos arm64 "$MACOS_OVERRIDE" 'bundle/{dmg,macos}/**' false
-                elif [ "$RUNNER_TYPE" = "github" ]; then add macos arm64 '["macos-latest"]' 'bundle/{dmg,macos}/**' false
+                if [ -n "$MACOS_OVERRIDE" ]; then add macos arm64 "$MACOS_OVERRIDE" 'bundle/**' false
+                elif [ "$RUNNER_TYPE" = "github" ]; then add macos arm64 '["macos-latest"]' 'bundle/**' false
                 else incompat="$incompat macos"; fi ;;
             esac
           done <<< "$toks"
