@@ -21,6 +21,15 @@ name: Tauri Build (reusable)
 #   - github      : ogni target sul runner GitHub-hosted nativo
 #                   (linux-x64→ubuntu-latest, linux-arm64→ubuntu-24.04-arm,
 #                    windows→windows-latest, macos→macos-latest).
+#
+# Pubblicazione updater (opzionale, `publish_release: true`): dopo la build, il job `publish`
+# raccoglie gli artefatti updater firmati (installer + `.sig`, richiede `createUpdaterArtifacts`
+# attivo nel progetto + secret TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD)) e pubblica una GitHub
+# Release + manifest `latest.json` (schema Tauri v2) sul repo `releases_repo`. Pensato per un
+# repo PUBBLICO dedicato ai soli binari quando il repo sorgente è privato: gli asset di una
+# Release privata non sono scaricabili in anonimo, ma l'updater Tauri fa una richiesta HTTP
+# senza autenticazione. Richiede il secret RELEASES_TOKEN (PAT con Contents:Read&Write sul
+# repo releases).
 
 on:
   workflow_call:
@@ -93,6 +102,21 @@ on:
         required: false
         default: '22'
         type: string
+      publish_release:
+        description: 'true → dopo la build pubblica una GitHub Release + latest.json (manifest updater Tauri v2) sul repo releases_repo. Richiede createUpdaterArtifacts attivo + secret TAURI_SIGNING_*/RELEASES_TOKEN.'
+        required: false
+        default: false
+        type: boolean
+      releases_repo:
+        description: '[Publish] owner/repo (idealmente pubblico) dove pubblicare la release updater, es. "org/app-releases". Richiesto se publish_release=true.'
+        required: false
+        default: ''
+        type: string
+      release_notes:
+        description: '[Publish] Note di rilascio opzionali (release + latest.json). Default: generato automaticamente dalla versione.'
+        required: false
+        default: ''
+        type: string
     secrets:
       TELEGRAM_BOT_TOKEN:
         required: false
@@ -105,6 +129,10 @@ on:
       TAURI_SIGNING_PRIVATE_KEY:
         required: false
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+      # PAT con Contents:Read&Write sul repo `releases_repo` (facoltativo, richiesto solo se
+      # publish_release=true). NON è lo stesso token di SUBMODULES_TOKEN (quello è read-only).
+      RELEASES_TOKEN:
         required: false
 
 jobs:
@@ -332,3 +360,134 @@ jobs:
               report "$(send_text "$FCAP")"
             fi
           done
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # PUBLISH — opzionale (publish_release=true, e solo su build non-debug): raccoglie gli
+  # artefatti updater firmati (installer + `.sig`) da TUTTI i target della matrix e pubblica
+  # una GitHub Release + latest.json (manifest Tauri v2) sul repo `releases_repo`. Richiede
+  # `needs: build` con esito successo su TUTTA la matrix (fail-fast:false → se un target
+  # fallisce, `build` risulta failure e publish viene saltato: niente release parziali).
+  # ────────────────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish updater release
+    needs: build
+    if: ${{ inputs.publish_release == true && inputs.build_debug == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -z "${{ inputs.releases_repo }}" ]; then
+            echo "::error::publish_release=true richiede l'input releases_repo (es. owner/repo)"; exit 1
+          fi
+          if [ -z "$RELEASES_TOKEN" ]; then
+            echo "::error::publish_release=true richiede il secret RELEASES_TOKEN (PAT con Contents:Read&Write sul repo releases)"; exit 1
+          fi
+
+      # Checkout minimo, serve solo a leggere la versione da src-tauri/tauri.conf.json.
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(jq -r '.version' "${{ inputs.project_dir }}/src-tauri/tauri.conf.json")
+          if [ -z "$V" ] || [ "$V" = "null" ]; then
+            echo "::error::impossibile leggere .version da ${{ inputs.project_dir }}/src-tauri/tauri.conf.json"; exit 1
+          fi
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Ogni .sig scaricato è abbinato al binario con lo stesso path meno ".sig" (più
+      # resiliente dei nomi file esatti prodotti da Tauri, che variano per OS/versione).
+      # La piattaforma (chiave latest.json) è dedotta dal nome della cartella artifact
+      # (<app>-desktop-<os>-<arch>-<sha>, generata dal job build) → mappata sui nomi Tauri.
+      - name: Build latest.json + collect release assets
+        shell: bash
+        env:
+          VERSION_TAG: ${{ steps.ver.outputs.tag }}
+          NOTES: ${{ inputs.release_notes }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          PLATFORMS_JSON="{}"
+
+          while IFS= read -r -d '' SIG; do
+            BIN="${SIG%.sig}"
+            if [ ! -f "$BIN" ]; then
+              echo "::warning::sig senza binario corrispondente: $SIG"; continue
+            fi
+            ARTDIR=$(echo "$SIG" | sed -E 's#^artifacts/([^/]+)/.*#\1#')
+            OS=$(echo "$ARTDIR" | sed -E 's/^.*-desktop-([a-z]+)-([a-z0-9]+)-[0-9a-f]+$/\1/')
+            ARCH=$(echo "$ARTDIR" | sed -E 's/^.*-desktop-([a-z]+)-([a-z0-9]+)-[0-9a-f]+$/\2/')
+            case "$OS-$ARCH" in
+              linux-x64) PLAT=linux-x86_64 ;;
+              linux-arm64) PLAT=linux-aarch64 ;;
+              windows-x64) PLAT=windows-x86_64 ;;
+              macos-arm64) PLAT=darwin-aarch64 ;;
+              macos-x64) PLAT=darwin-x86_64 ;;
+              *) echo "::warning::piattaforma non mappata per '$OS-$ARCH' (artifact dir: $ARTDIR)"; continue ;;
+            esac
+
+            BASENAME=$(basename "$BIN")
+            cp "$BIN" "release-assets/$BASENAME"
+            SIGNATURE=$(cat "$SIG")
+            URL="https://github.com/${RELEASES_REPO}/releases/download/${VERSION_TAG}/${BASENAME}"
+            PLATFORMS_JSON=$(jq --arg k "$PLAT" --arg url "$URL" --arg sig "$SIGNATURE" \
+              '. + {($k): {"signature": $sig, "url": $url}}' <<< "$PLATFORMS_JSON")
+          done < <(find artifacts -type f -name '*.sig' -print0)
+
+          if [ "$PLATFORMS_JSON" = "{}" ]; then
+            echo "::error::nessun artefatto updater (.sig) trovato tra i build artifact: createUpdaterArtifacts e i secret TAURI_SIGNING_* sono attivi nel job build?"; exit 1
+          fi
+
+          NOTES_FINAL="${NOTES:-WarpMobile Desktop ${VERSION_TAG}}"
+          jq -n --arg version "${VERSION_TAG#v}" --arg notes "$NOTES_FINAL" --arg date "$PUB_DATE" \
+            --argjson platforms "$PLATFORMS_JSON" \
+            '{version: $version, notes: $notes, pub_date: $date, platforms: $platforms}' \
+            > release-assets/latest.json
+          echo "--- latest.json ---"; cat release-assets/latest.json
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          NOTES: ${{ inputs.release_notes }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
+        run: |
+          set -euo pipefail
+          NOTES_FINAL="${NOTES:-WarpMobile Desktop ${TAG}}"
+          if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --repo "$RELEASES_REPO" --clobber
+          else
+            gh release create "$TAG" release-assets/* --repo "$RELEASES_REPO" \
+              --title "WarpMobile Desktop ${TAG}" --notes "$NOTES_FINAL"
+          fi
+
+      # Notifica best-effort (non fa fallire il job se Telegram non risponde).
+      - name: Send notification via Telegram
+        if: ${{ always() }}
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APP_NAME: ${{ inputs.app_name }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Skip notifica Telegram (token/chat mancante)"; exit 0
+          fi
+          ICON="✅"; [ "$JOB_STATUS" = "success" ] || ICON="❌"
+          TEXT="${ICON} ${APP_NAME} desktop — release updater ${TAG} pubblicata su ${RELEASES_REPO} (${JOB_STATUS})"
+          curl -s -o /dev/null -F "chat_id=${TELEGRAM_CHAT_ID}" -F "text=${TEXT}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" || true

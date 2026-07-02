@@ -53,8 +53,31 @@ self-hosted è offline/incompatibile).
 - Il frontend desktop usa `@shared` → `../shared` del repo principale: serve il checkout
   dell'intero repo consumatore (è il default; `has_submodules` se ci sono submoduli privati).
 
+## Pubblicazione updater (job `publish`, opzionale)
+
+`publish_release: true` (default `false`) attiva, dopo `build`, un job `publish` che pubblica
+l'auto-update Tauri:
+
+- Richiede `needs: build` con successo su **tutta** la matrix (fail-fast:false → un target
+  fallito fa fallire `build` nel complesso → `publish` viene saltato, niente release parziali).
+- Scarica tutti gli artifact della matrix (`actions/download-artifact@v4` senza `name`), abbina
+  ogni `.sig` al binario corrispondente (stesso path meno `.sig`) — deduzione generica, non
+  nomi file hardcoded, perché Tauri li varia leggermente per OS/versione.
+- Deduce la piattaforma (chiave `latest.json`) dal nome cartella artifact
+  (`<app>-desktop-<os>-<arch>-<sha>`) mappandola sui nomi attesi da Tauri v2
+  (`linux-x86_64`, `linux-aarch64`, `windows-x86_64`, `darwin-x86_64`, `darwin-aarch64`).
+- Legge la versione da `<project_dir>/src-tauri/tauri.conf.json` (`.version`), usa `vX.Y.Z` come
+  tag release.
+- Costruisce `latest.json` (schema Tauri v2: `version`/`notes`/`pub_date`/`platforms.{...}`) e
+  pubblica (`gh release create`, o `upload --clobber` se il tag esiste già — idempotente sui
+  re-run) su `releases_repo` con il secret `RELEASES_TOKEN`.
+
+**Perché un repo `releases_repo` separato ha senso quando il sorgente è privato:** gli asset di
+una GitHub Release privata non sono scaricabili in anonimo, ma l'updater Tauri fa una richiesta
+HTTP senza autenticazione — un repo pubblico dedicato ai soli binari (nessun codice) risolve
+senza bisogno di infrastruttura server aggiuntiva. `RELEASES_TOKEN` è un PAT dedicato
+(Contents:Read&Write solo su quel repo), diverso da `SUBMODULES_TOKEN` (quello è read-only).
+
 ## Estensioni future
 
 - Firma/notarization macOS, code-signing Windows: aggiungere secret + step qui (non nei wrapper).
-- Pubblicazione GitHub Release + `latest.json` per l'updater Tauri: nuovo input opzionale
-  `publish_release`, da implementare qui centralmente.
