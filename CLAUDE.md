@@ -17,9 +17,10 @@ una **matrix JSON** (`{os, arch, runner, bundle_glob, apt}`), poi `build` esegue
 sul runner nativo (`runs-on: matrix.runner`). Target: `linux-x64`, `linux-arm64`, `windows`,
 `macos` (alias: `linux`→`linux-arm64`, `x64`/`x86_64`→`linux-x64`, `win`→`windows`, `mac`/`darwin`→`macos`).
 
-- **linux-x64 / linux-arm64** → `.deb`/`.AppImage`/`.rpm`. Serve GTK/WebKit
-  (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libsoup-3.0-dev`, `librsvg2-dev`). `matrix.apt`
-  le installa sui runner GitHub-hosted e sui self-hosted freschi.
+- **linux-x64 / linux-arm64** → `.deb`/`.AppImage`/`.rpm`. Serve GTK/WebKit e, per il tray,
+  AppIndicator (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libsoup-3.0-dev`,
+  `libayatana-appindicator3-dev`, `librsvg2-dev`). `matrix.apt` le installa sui runner
+  GitHub-hosted e sui self-hosted freschi.
 - **windows** → `.msi`/NSIS `.exe` (x86_64). Serve toolchain MSVC + WebView2: **runner Windows**.
 - **macos** → `.dmg`/`.app` (Apple Silicon). Serve **host macOS** + Xcode CLT: NON compilabile da Linux.
 
@@ -48,6 +49,9 @@ self-hosted è offline/incompatibile).
 - Secret passati **per nome** dai wrapper (non `inherit`, inaffidabile cross-repo).
 - `SUBMODULES_TOKEN`: PAT org-wide read-only Contents per submodule privati cross-repo
   (il `GITHUB_TOKEN` di default è scoped al solo repo in build). Fallback a `github.token`.
+- Una build senza `TAURI_SIGNING_PRIVATE_KEY` disabilita via `--config` soltanto gli artefatti
+  updater: gli installer ordinari vengono comunque prodotti. `publish_release=true` senza
+  chiave fallisce invece prima della build, perché una release updater non firmata è invalida.
 - Notifica Telegram **best-effort** (non fa fallire il job); Local Bot API Server con fallback
   cloud (50 MB), stesso schema di expo-ci.
 - Il frontend desktop usa `@shared` → `../shared` del repo principale: serve il checkout

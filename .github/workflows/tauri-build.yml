@@ -257,7 +257,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            librsvg2-dev build-essential curl wget file libssl-dev pkg-config
+            libayatana-appindicator3-dev librsvg2-dev \
+            build-essential curl wget file libssl-dev pkg-config
 
       # Il progetto desktop è npm-based (package-lock.json). `npm ci` = install riproducibile.
       # `tauri build` lancia da solo beforeBuildCommand (npm run build → tsc + vite build).
@@ -271,11 +272,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          args=(build)
           if [ "${{ inputs.build_debug }}" = "true" ]; then
-            npm run tauri -- build --debug
-          else
-            npm run tauri -- build
+            args+=(--debug)
           fi
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            if [ "${{ inputs.publish_release }}" = "true" ]; then
+              echo "::error::publish_release=true richiede il secret TAURI_SIGNING_PRIVATE_KEY"
+              exit 1
+            fi
+            # I progetti possono tenere createUpdaterArtifacts=true per le release firmate:
+            # una build ordinaria senza chiave deve comunque produrre installer installabili.
+            args+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+          fi
+          npm run tauri -- "${args[@]}"
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4

@@ -69,6 +69,8 @@ di una piattaforma, scavalcando il default del `runner_type` (es. un runner self
 - `SUBMODULES_TOKEN` — PAT read-only Contents per submodule privati cross-repo.
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — notifica best-effort con l'installer in allegato.
 - `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — firma artefatti updater.
+  Senza chiave il workflow produce comunque gli installer ordinari, disabilitando gli artefatti
+  updater per quel build; `publish_release=true` richiede invece obbligatoriamente la chiave.
 
 ## ⚠️ `@main` è live per tutti
 
