@@ -63,11 +63,14 @@ di una piattaforma, scavalcando il default del `runner_type` (es. un runner self
 | `setup_rust`          | `true`                          | Assicura Rust stable via rustup |
 | `selfhosted_linux_runner` | `["self-hosted","nexus-core"]` | `runs-on` per `linux-arm64` self-hosted |
 | `linux_x64_runner` / `linux_arm64_runner` / `windows_runner` / `macos_runner` | `''` | Override `runs-on` (JSON array); scavalca il default del `runner_type` |
+| `telegram_topic_id`   | `''`                            | `message_thread_id` del topic in cui pubblicare le notifiche, se la chat è un supergruppo con i Topics. Vuoto = topic General |
 
 ### Secret (tutti opzionali)
 
 - `SUBMODULES_TOKEN` — PAT read-only Contents per submodule privati cross-repo.
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — notifica best-effort con l'installer in allegato.
+  Il topic si sceglie con l'input `telegram_topic_id` (non è un secret): vale sia per la
+  notifica dei bundle sia per quella della release updater.
 - `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — firma artefatti updater.
   Senza chiave il workflow produce comunque gli installer ordinari, disabilitando gli artefatti
   updater per quel build; `publish_release=true` richiede invece obbligatoriamente la chiave.

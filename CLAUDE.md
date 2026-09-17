@@ -54,6 +54,9 @@ self-hosted è offline/incompatibile).
   chiave fallisce invece prima della build, perché una release updater non firmata è invalida.
 - Notifica Telegram **best-effort** (non fa fallire il job); Local Bot API Server con fallback
   cloud (50 MB), stesso schema di expo-ci.
+- Gli step di notifica sono **due** (bundle prodotti e release updater): un cambiamento al
+  formato o all'instradamento va applicato a entrambi. `telegram_topic_id` è facoltativo e
+  vuoto di default, inviato come campo `message_thread_id` separato solo se valorizzato.
 - Il frontend desktop usa `@shared` → `../shared` del repo principale: serve il checkout
   dell'intero repo consumatore (è il default; `has_submodules` se ci sono submoduli privati).
 
