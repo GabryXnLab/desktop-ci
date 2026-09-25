@@ -225,6 +225,17 @@ jobs:
           echo "matrix={\"include\":[$entries]}" >> "$GITHUB_OUTPUT"
           echo "Matrix: {\"include\":[$entries]}"
 
+      # Se la matrice non si risolve, build e publish vengono saltati e non notificherebbero.
+      - name: Notify failure via Telegram
+        if: ${{ failure() || cancelled() }}
+        uses: GabryXnLab/ci-bot/notify@main
+        with:
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: ${{ job.status }}
+          title: ${{ inputs.app_name }} desktop, risoluzione dei target
+
   # ────────────────────────────────────────────────────────────────────────────
   # BUILD — un job per target compatibile, sul runner nativo risolto da setup.
   # ────────────────────────────────────────────────────────────────────────────
@@ -301,87 +312,26 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-      # Notifica best-effort (non fa fallire il job se Telegram non risponde).
-      - name: Send notification via Telegram
+      # Esito sempre (azione e bot in GabryXnLab/ci-bot): un file per ciascun formato di bundle
+      # se il job riesce, altrimenti il pulsante per rilanciare il run. Best-effort.
+      # L'azione gira dalla radice del workspace, non da project_dir: i pattern lo includono.
+      - name: Notify via Telegram
         if: ${{ always() }}
-        shell: bash
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_TOPIC_ID: ${{ inputs.telegram_topic_id }}
-          APP_NAME: ${{ inputs.app_name }}
-          OS_NAME: ${{ matrix.os }}-${{ matrix.arch }}
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "Skip notifica Telegram (token/chat mancante)"; exit 0
-          fi
-          REL_DIR="src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle"
-          # Tutti i bundle distribuibili prodotti (per Linux sono più formati: .deb/.AppImage/.rpm).
-          # A differenza dell'APK (file unico) qui ne mandiamo UNO per ciascun formato trovato.
-          mapfile -t FILES < <(find "$REL_DIR" -type f \( -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" \
-            -o -name "*.msi" -o -name "*.exe" -o -name "*.dmg" -o -name "*.app.tar.gz" \) 2>/dev/null | sort)
-          SHORT_SHA="${GITHUB_SHA:0:7}"
-          ICON="✅"; [ "$JOB_STATUS" = "success" ] || ICON="❌"
-          LINE1="${ICON} ${APP_NAME} desktop \`${OS_NAME}\` — \`${SHORT_SHA}\` (${JOB_STATUS})"
-          LINE2="Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          CAPTION="${LINE1}"$'\n'"${LINE2}"
-
-          # Il topic va passato come campo a parte: message_thread_id vuoto viene
-          # rifiutato dalla Bot API, quindi l'argomento esiste solo se valorizzato.
-          TG_THREAD=()
-          [ -n "${TELEGRAM_TOPIC_ID}" ] && TG_THREAD=(-F "message_thread_id=${TELEGRAM_TOPIC_ID}")
-
-          # Local Bot API Server (limite ~2 GB) con fallback al cloud (limite 50 MB).
-          TG_LOCAL="${TELEGRAM_API_BASE:-http://localhost:8081}"
-          TG_CLOUD="https://api.telegram.org"
-          if curl -sf -m 5 "${TG_LOCAL}/bot${TELEGRAM_BOT_TOKEN}/getMe" -o /dev/null 2>/dev/null; then
-            TG_API="${TG_LOCAL}/bot${TELEGRAM_BOT_TOKEN}"; MAX_BYTES=2097152000; MAX_LABEL="2 GB (Local Bot API Server)"
-          else
-            TG_API="${TG_CLOUD}/bot${TELEGRAM_BOT_TOKEN}"; MAX_BYTES=52428800; MAX_LABEL="50 MB (Bot API cloud)"
-          fi
-
-          # Helper invio: $1=text/file, gestisce over-limit con nota (come il pattern APK).
-          send_text() {
-            curl -s -o /tmp/tg_resp.json -w "%{http_code}" \
-              -F "chat_id=${TELEGRAM_CHAT_ID}" "${TG_THREAD[@]}" -F "text=$1" -F "parse_mode=Markdown" \
-              "${TG_API}/sendMessage" || echo "000"
-          }
-          send_file() {
-            curl -s -o /tmp/tg_resp.json -w "%{http_code}" \
-              -F "chat_id=${TELEGRAM_CHAT_ID}" "${TG_THREAD[@]}" -F "document=@$1" -F "caption=$2" \
-              "${TG_API}/sendDocument" || echo "000"
-          }
-
-          report() { # $1=http_code
-            [ "$1" = "200" ] && echo "Notifica Telegram inviata." || {
-              echo "warn: invio Telegram fallito (HTTP $1, build comunque OK, bundle disponibile come artifact)";
-              cat /tmp/tg_resp.json 2>/dev/null || true; echo ""; }
-          }
-
-          # Build fallita o nessun bundle prodotto → solo messaggio di testo col link al run.
-          if [ "$JOB_STATUS" != "success" ] || [ "${#FILES[@]}" -eq 0 ]; then
-            [ "${#FILES[@]}" -eq 0 ] && [ "$JOB_STATUS" = "success" ] && \
-              CAPTION="${CAPTION}"$'\n'"⚠️ Nessun bundle distribuibile trovato in ${REL_DIR}."
-            report "$(send_text "${CAPTION}")"
-            exit 0
-          fi
-
-          # Un invio per ciascun bundle prodotto: sotto soglia → il file; oltre → solo link+nota.
-          for FILE in "${FILES[@]}"; do
-            BYTES=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null || echo 0)
-            MB=$(( BYTES / 1024 / 1024 ))
-            BASENAME=$(basename "$FILE")
-            FCAP="${CAPTION}"$'\n'"📦 \`${BASENAME}\` (${MB} MB)"
-            echo "Bundle: ${FILE} (${MB} MB)"
-            if [ "$BYTES" -gt 0 ] && [ "$BYTES" -le "$MAX_BYTES" ]; then
-              report "$(send_file "$FILE" "$FCAP")"
-            else
-              echo "Bundle ${MB} MB oltre il limite ${MAX_LABEL}: invio solo il link al run."
-              FCAP="${FCAP}"$'\n'"⚠️ ${MB} MB: oltre il limite (${MAX_LABEL}), scaricalo dagli artifact del run."
-              report "$(send_text "$FCAP")"
-            fi
-          done
+        uses: GabryXnLab/ci-bot/notify@main
+        with:
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: ${{ job.status }}
+          title: ${{ inputs.app_name }} desktop ${{ matrix.os }}-${{ matrix.arch }}
+          files: |
+            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.deb
+            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.AppImage
+            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.rpm
+            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.msi
+            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.exe
+            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.dmg
+            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.app.tar.gz
 
   # ────────────────────────────────────────────────────────────────────────────
   # PUBLISH — opzionale (publish_release=true, e solo su build non-debug): raccoglie gli
@@ -494,25 +444,12 @@ jobs:
               --title "WarpMobile Desktop ${TAG}" --notes "$NOTES_FINAL"
           fi
 
-      # Notifica best-effort (non fa fallire il job se Telegram non risponde).
-      - name: Send notification via Telegram
+      - name: Notify via Telegram
         if: ${{ always() }}
-        shell: bash
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_TOPIC_ID: ${{ inputs.telegram_topic_id }}
-          APP_NAME: ${{ inputs.app_name }}
-          TAG: ${{ steps.ver.outputs.tag }}
-          RELEASES_REPO: ${{ inputs.releases_repo }}
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "Skip notifica Telegram (token/chat mancante)"; exit 0
-          fi
-          ICON="✅"; [ "$JOB_STATUS" = "success" ] || ICON="❌"
-          TEXT="${ICON} ${APP_NAME} desktop — release updater ${TAG} pubblicata su ${RELEASES_REPO} (${JOB_STATUS})"
-          TG_THREAD=()
-          [ -n "${TELEGRAM_TOPIC_ID}" ] && TG_THREAD=(-F "message_thread_id=${TELEGRAM_TOPIC_ID}")
-          curl -s -o /dev/null -F "chat_id=${TELEGRAM_CHAT_ID}" "${TG_THREAD[@]}" -F "text=${TEXT}" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" || true
+        uses: GabryXnLab/ci-bot/notify@main
+        with:
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: ${{ job.status }}
+          title: ${{ inputs.app_name }} desktop, release updater ${{ steps.ver.outputs.tag }} su ${{ inputs.releases_repo }}

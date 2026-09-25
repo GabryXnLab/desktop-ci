@@ -52,11 +52,13 @@ self-hosted è offline/incompatibile).
 - Una build senza `TAURI_SIGNING_PRIVATE_KEY` disabilita via `--config` soltanto gli artefatti
   updater: gli installer ordinari vengono comunque prodotti. `publish_release=true` senza
   chiave fallisce invece prima della build, perché una release updater non firmata è invalida.
-- Notifica Telegram **best-effort** (non fa fallire il job); Local Bot API Server con fallback
-  cloud (50 MB), stesso schema di expo-ci.
-- Gli step di notifica sono **due** (bundle prodotti e release updater): un cambiamento al
-  formato o all'instradamento va applicato a entrambi. `telegram_topic_id` è facoltativo e
-  vuoto di default, inviato come campo `message_thread_id` separato solo se valorizzato.
+- Notifica Telegram tramite l'azione `GabryXnLab/ci-bot/notify@main` (repo privato, bot
+  `@BobCI_bot` dedicato alla CI), best-effort: bundle come file se il job riesce, altrimenti
+  messaggio con il pulsante «🔁 Rilancia». L'azione è raggiungibile solo perché i chiamanti
+  sono repo privati dell'org (vedi `CLAUDE.md` di `ci-bot`).
+- Gli step di notifica sono **tre**: `setup` (solo fallimenti: senza matrice il resto viene
+  saltato), un messaggio per target in `build`, la release updater in `publish`. L'azione gira
+  dalla radice del workspace, non da `project_dir`: i pattern dei file lo includono.
 - Il frontend desktop usa `@shared` → `../shared` del repo principale: serve il checkout
   dell'intero repo consumatore (è il default; `has_submodules` se ci sono submoduli privati).
 
