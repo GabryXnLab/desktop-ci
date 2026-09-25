@@ -251,6 +251,17 @@ jobs:
       run:
         working-directory: ${{ inputs.project_dir }}
     steps:
+      # «In corso» con ⏹ Annulla (ci-bot); lo step finale riscrive lo stesso messaggio.
+      - name: Notify start via Telegram
+        id: started
+        uses: GabryXnLab/ci-bot/notify@main
+        with:
+          run_inputs: ${{ toJSON(github.event.inputs) }}
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: started
+          title: ${{ inputs.app_name }} desktop ${{ matrix.os }}-${{ matrix.arch }}
       - uses: actions/checkout@v4
         with:
           submodules: ${{ inputs.has_submodules && 'recursive' || 'false' }}
@@ -320,6 +331,7 @@ jobs:
         if: ${{ always() }}
         uses: GabryXnLab/ci-bot/notify@main
         with:
+          message_id: ${{ steps.started.outputs.message_id }}
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
