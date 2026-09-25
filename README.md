@@ -63,7 +63,7 @@ di una piattaforma, scavalcando il default del `runner_type` (es. un runner self
 | `setup_rust`          | `true`                          | Assicura Rust stable via rustup |
 | `selfhosted_linux_runner` | `["self-hosted","nexus-core"]` | `runs-on` per `linux-arm64` self-hosted |
 | `linux_x64_runner` / `linux_arm64_runner` / `windows_runner` / `macos_runner` | `''` | Override `runs-on` (JSON array); scavalca il default del `runner_type` |
-| `telegram_topic_id`   | `''`                            | `message_thread_id` del topic in cui pubblicare le notifiche, se la chat è un supergruppo con i Topics. Vuoto = topic General |
+| `telegram_topic_id`   | `''`                            | `message_thread_id` del topic in cui pubblicare le notifiche, se la chat è un supergruppo con i Topics. Vuoto = nessuna notifica (il bot CI non scrive nel General né in DM) |
 
 ### Secret (tutti opzionali)
 
