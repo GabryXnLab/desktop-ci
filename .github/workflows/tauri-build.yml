@@ -52,6 +52,21 @@ on:
         required: false
         default: 'desktop'
         type: string
+      max_workers:
+        description: >-
+          Job di cargo (e di CMake) per questo run. auto = sul self-hosted le CPU libere in quel
+          momento, mai sotto 2; su GitHub tutte | 2 | 4. Stesso input, stessi valori e stesso
+          significato in flutter-ci, expo-ci e desktop-ci (GabryXnLab/build-kit).
+        required: false
+        default: 'auto'
+        type: string
+      clear_cache:
+        description: >-
+          Solo self-hosted: cancella la cartella target di cargo del repo e, per questo run,
+          sccache ricompila e riscrive invece di fidarsi della cache condivisa.
+        required: false
+        default: false
+        type: boolean
       build_debug:
         description: 'true → build di debug (più veloce, non firmata). false → release (default).'
         required: false
@@ -262,14 +277,54 @@ jobs:
           topic_id: ${{ inputs.telegram_topic_id }}
           status: started
           title: ${{ inputs.app_name }} desktop ${{ matrix.os }}-${{ matrix.arch }}
+      # Sul self-hosted il checkout non pulisce: node_modules e ciò che gli altri workflow
+      # del repo tengono nella stessa cartella di lavoro (android/ di Riftgate) restano. La
+      # cartella target di cargo sta comunque fuori dal checkout (build-kit, rust: true).
       - uses: actions/checkout@v4
         with:
+          clean: ${{ !contains(toJSON(matrix.runner), 'self-hosted') }}
           submodules: ${{ inputs.has_submodules && 'recursive' || 'false' }}
           token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
+
+      # Job di cargo, sccache condiviso fra i progetti Rust e target fuori dal checkout:
+      # il pezzo comune a tutte le build, in GabryXnLab/build-kit.
+      - name: Tune build
+        id: tune
+        uses: GabryXnLab/build-kit/setup@main
+        with:
+          runner: ${{ contains(toJSON(matrix.runner), 'self-hosted') && 'self-hosted' || 'github' }}
+          max_workers: ${{ inputs.max_workers }}
+          clear_cache: ${{ inputs.clear_cache }}
+          rust: 'true'
+
+      # Da qui in poi la cartella target è quella di build-kit sul self-hosted, quella del
+      # progetto altrove: tutti i percorsi degli artefatti passano da questo output.
+      - name: Resolve target dir
+        id: target
+        shell: bash
+        env:
+          CARGO_DIR: ${{ steps.tune.outputs.cargo_target_dir }}
+          PROJECT_DIR: ${{ inputs.project_dir }}
+          PROFILE: ${{ inputs.build_debug && 'debug' || 'release' }}
+        run: |
+          set -euo pipefail
+          DIR="${CARGO_DIR:-$GITHUB_WORKSPACE/$PROJECT_DIR/src-tauri/target}/$PROFILE"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          # La cartella target sopravvive fra i run: i bundle di una versione precedente
+          # partirebbero su Telegram insieme a quelli nuovi.
+          rm -rf "$DIR/bundle"
 
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
+
+      # pnpm quando il progetto ha il suo lockfile, con la versione di `packageManager`;
+      # npm altrimenti. `npm ci` su un progetto pnpm fallisce subito (niente package-lock).
+      - name: Setup pnpm
+        if: ${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.project_dir)) != '' }}
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ${{ inputs.project_dir }}/package.json
 
       # Toolchain Rust stable (idempotente: no-op se già presente con rustup).
       - name: Setup Rust
@@ -288,11 +343,12 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev \
             build-essential curl wget file libssl-dev pkg-config
 
-      # Il progetto desktop è npm-based (package-lock.json). `npm ci` = install riproducibile.
-      # `tauri build` lancia da solo beforeBuildCommand (npm run build → tsc + vite build).
+      # Install riproducibile col package manager del lockfile. `tauri build` lancia da solo
+      # beforeBuildCommand (build del frontend: tsc + vite build).
       - name: Install JS dependencies
         shell: bash
-        run: npm ci
+        run: |
+          if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; else npm ci; fi
 
       - name: Tauri build
         shell: bash
@@ -314,13 +370,14 @@ jobs:
             # una build ordinaria senza chiave deve comunque produrre installer installabili.
             args+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
           fi
-          npm run tauri -- "${args[@]}"
+          if [ -f pnpm-lock.yaml ]; then pnpm tauri "${args[@]}"; else npm run tauri -- "${args[@]}"; fi
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then "$RUSTC_WRAPPER" --show-stats | grep -E 'Cache (hits|misses)' || true; fi
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.app_name }}-desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ github.sha }}
-          path: ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/${{ matrix.bundle_glob }}
+          path: ${{ steps.target.outputs.dir }}/${{ matrix.bundle_glob }}
           if-no-files-found: warn
           retention-days: 3
 
@@ -339,13 +396,13 @@ jobs:
           status: ${{ job.status }}
           title: ${{ inputs.app_name }} desktop ${{ matrix.os }}-${{ matrix.arch }}
           files: |
-            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.deb
-            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.AppImage
-            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.rpm
-            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.msi
-            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.exe
-            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.dmg
-            ${{ inputs.project_dir }}/src-tauri/target/${{ inputs.build_debug && 'debug' || 'release' }}/bundle/**/*.app.tar.gz
+            ${{ steps.target.outputs.dir }}/bundle/**/*.deb
+            ${{ steps.target.outputs.dir }}/bundle/**/*.AppImage
+            ${{ steps.target.outputs.dir }}/bundle/**/*.rpm
+            ${{ steps.target.outputs.dir }}/bundle/**/*.msi
+            ${{ steps.target.outputs.dir }}/bundle/**/*.exe
+            ${{ steps.target.outputs.dir }}/bundle/**/*.dmg
+            ${{ steps.target.outputs.dir }}/bundle/**/*.app.tar.gz
 
   # ────────────────────────────────────────────────────────────────────────────
   # PUBLISH — opzionale (publish_release=true, e solo su build non-debug): raccoglie gli
