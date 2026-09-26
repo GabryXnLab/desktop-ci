@@ -42,9 +42,25 @@ La matrix (`{os, runner, bundle_glob, apt}`) è generata in `setup` e consumata 
 (`runs-on: matrix.runner`). `setup` gira su `ubuntu-latest` (sempre disponibile, anche se il
 self-hosted è offline/incompatibile).
 
+## Velocità sul self-hosted (con `GabryXnLab/build-kit`)
+
+- `max_workers` (`auto` | `2` | `4`) → `CARGO_BUILD_JOBS`, stesso input e significato di
+  flutter-ci ed expo-ci; lo applica `build-kit/setup` (leggere il suo `CLAUDE.md`).
+- **La cartella target di cargo sta fuori dal checkout**, in `~/ci/cache/cargo-target/<repo>`,
+  e il checkout non pulisce: prima ogni build ricompilava tutto, e siccome mobile e desktop
+  dello stesso repo condividono la cartella di lavoro, il `git clean` dell'uno cancellava gli
+  intermedi dell'altro. I bundle della versione precedente si tolgono prima della build
+  (altrimenti partirebbero su Telegram). I percorsi degli artefatti passano dall'output
+  `steps.target.outputs.dir`.
+- **sccache** (`RUSTC_WRAPPER`, `~/.cache/sccache`, 10 GB) è condiviso fra tutti i progetti
+  Rust della macchina: le dipendenze da `~/.cargo/registry` si compilano una volta.
+  `clear_cache` cancella la target del repo e mette sccache in `RECACHE`.
+
 ## Convenzioni (allineate a expo-ci)
 
-- Il progetto desktop è **npm**-based (`package-lock.json`) → `npm ci`. (Il mobile usa pnpm; qui no.)
+- Package manager dal lockfile di `project_dir`: `pnpm-lock.yaml` → pnpm (versione da
+  `packageManager`), altrimenti `npm ci`. Riftgate desktop è pnpm: con `npm ci` la build
+  falliva subito.
 - `tauri build` lancia da solo `beforeBuildCommand` (`npm run build` = tsc + vite build).
 - Secret passati **per nome** dai wrapper (non `inherit`, inaffidabile cross-repo).
 - `SUBMODULES_TOKEN`: PAT org-wide read-only Contents per submodule privati cross-repo
