@@ -373,8 +373,13 @@ jobs:
           if [ -f pnpm-lock.yaml ]; then pnpm tauri "${args[@]}"; else npm run tauri -- "${args[@]}"; fi
           if [ -n "${RUSTC_WRAPPER:-}" ]; then "$RUSTC_WRAPPER" --show-stats | grep -E 'Cache (hits|misses)' || true; fi
 
+      # La quota di storage degli artifact è dell'org (piano free) e si ricalcola ogni 6-12 h:
+      # quando è piena una build riuscita non deve risultare fallita. La consegna vera è il
+      # file su Telegram; senza artifact manca solo il pulsante «Rimanda artefatti». Resta
+      # bloccante quando si pubblica la release, che si costruisce proprio da questi artifact.
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
+        continue-on-error: ${{ !inputs.publish_release }}
         with:
           name: ${{ inputs.app_name }}-desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ github.sha }}
           path: ${{ steps.target.outputs.dir }}/${{ matrix.bundle_glob }}
