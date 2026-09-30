@@ -55,6 +55,10 @@ self-hosted è offline/incompatibile).
 - **sccache** (`RUSTC_WRAPPER`, `~/.cache/sccache`, 10 GB) è condiviso fra tutti i progetti
   Rust della macchina: le dipendenze da `~/.cargo/registry` si compilano una volta.
   `clear_cache` cancella la target del repo e mette sccache in `RECACHE`.
+- **Su `runner_type: github` la cache è quella di GitHub**, per repo: `Swatinem/rust-cache`
+  (registry e dipendenze compilate) e lo store di pnpm (o la cache di npm), chiave dal
+  lockfile. Con `clear_cache` il run non la riprende né la salva. Sul self-hosted quegli
+  step non girano.
 
 ## Convenzioni (allineate a expo-ci)
 
