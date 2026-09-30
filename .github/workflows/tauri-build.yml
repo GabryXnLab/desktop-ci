@@ -62,8 +62,9 @@ on:
         type: string
       clear_cache:
         description: >-
-          Solo self-hosted: cancella la cartella target di cargo del repo e, per questo run,
-          sccache ricompila e riscrive invece di fidarsi della cache condivisa.
+          Sul self-hosted cancella la cartella target di cargo del repo e, per questo run,
+          sccache ricompila e riscrive invece di fidarsi della cache condivisa. Su GitHub il
+          run non riprende né salva la cache di cargo e del package manager JS.
         required: false
         default: false
         type: boolean
@@ -330,6 +331,34 @@ jobs:
       - name: Setup Rust
         if: ${{ inputs.setup_rust == true }}
         uses: dtolnay/rust-toolchain@stable
+
+      # Un runner GitHub è nuovo a ogni job: senza, ogni build ricompila tutte le dipendenze
+      # Rust. La cache di GitHub è per repo, quindi vale fra i run dello stesso progetto, non
+      # fra progetti come sccache sul self-hosted (dove questo step non gira). Dopo Setup Rust:
+      # la chiave dipende dalla versione di rustc.
+      - name: Cargo cache (GitHub runner)
+        if: ${{ !contains(toJSON(matrix.runner), 'self-hosted') && inputs.clear_cache != true }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.project_dir }}/src-tauri -> target
+
+      # Store di pnpm (o cache di npm) fra i run dello stesso repo, per lo stesso motivo.
+      - name: JS package cache dir (GitHub runner)
+        id: jscache
+        if: ${{ !contains(toJSON(matrix.runner), 'self-hosted') && inputs.clear_cache != true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f pnpm-lock.yaml ]; then DIR=$(pnpm store path --silent); else DIR=$(npm config get cache); fi
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: JS package cache (GitHub runner)
+        if: ${{ steps.jscache.outputs.dir != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.jscache.outputs.dir }}
+          key: js-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.project_dir), format('{0}/package-lock.json', inputs.project_dir)) }}
+          restore-keys: js-${{ runner.os }}-${{ runner.arch }}-
 
       # Librerie di sistema per la WebView Tauri su Linux. Necessarie sui runner
       # GitHub-hosted e sui self-hosted freschi. matrix.apt è calcolato in setup.
