@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/GitHub%20Actions-reusable%20workflow-2088FF?logo=githubactions&logoColor=white" alt="Reusable workflow">
   <img src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" alt="Tauri v2">
   <img src="https://img.shields.io/badge/target-Linux%20x64%20%C2%B7%20Linux%20ARM64%20%C2%B7%20Windows%20%C2%B7%20macOS-4B5563" alt="Target: Linux x64, Linux ARM64, Windows, macOS">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licenza-Apache%202.0-blue" alt="Licenza Apache 2.0"></a>
   <a href="https://github.com/GabryXnLab/desktop-ci/commits/main"><img src="https://img.shields.io/github/last-commit/GabryXnLab/desktop-ci?label=ultimo%20commit" alt="Ultimo commit"></a>
 </p>
 
@@ -199,4 +200,4 @@ Il repo è pubblico e chiunque può chiamare questo workflow. Cosa sapere:
 
 ## Licenza
 
-Il repo non ha ancora un file di licenza: il codice è visibile e il workflow si può chiamare, ma non è concesso esplicitamente in licenza.
+Distribuito con licenza [Apache 2.0](LICENSE): si può usare, copiare e adattare, anche in progetti commerciali, mantenendo l'avviso di licenza e segnalando i file modificati.
