@@ -355,14 +355,16 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          BUILD_DEBUG: ${{ inputs.build_debug }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
         run: |
           set -euo pipefail
           args=(build)
-          if [ "${{ inputs.build_debug }}" = "true" ]; then
+          if [ "$BUILD_DEBUG" = "true" ]; then
             args+=(--debug)
           fi
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            if [ "${{ inputs.publish_release }}" = "true" ]; then
+            if [ "$PUBLISH_RELEASE" = "true" ]; then
               echo "::error::publish_release=true richiede il secret TAURI_SIGNING_PRIVATE_KEY"
               exit 1
             fi
@@ -425,8 +427,9 @@ jobs:
       - name: Validate inputs
         env:
           RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
         run: |
-          if [ -z "${{ inputs.releases_repo }}" ]; then
+          if [ -z "$RELEASES_REPO" ]; then
             echo "::error::publish_release=true richiede l'input releases_repo (es. owner/repo)"; exit 1
           fi
           if [ -z "$RELEASES_TOKEN" ]; then
@@ -439,11 +442,13 @@ jobs:
       - name: Read version
         id: ver
         shell: bash
+        env:
+          PROJECT_DIR: ${{ inputs.project_dir }}
         run: |
           set -euo pipefail
-          V=$(jq -r '.version' "${{ inputs.project_dir }}/src-tauri/tauri.conf.json")
+          V=$(jq -r '.version' "$PROJECT_DIR/src-tauri/tauri.conf.json")
           if [ -z "$V" ] || [ "$V" = "null" ]; then
-            echo "::error::impossibile leggere .version da ${{ inputs.project_dir }}/src-tauri/tauri.conf.json"; exit 1
+            echo "::error::impossibile leggere .version da $PROJECT_DIR/src-tauri/tauri.conf.json"; exit 1
           fi
           echo "tag=v$V" >> "$GITHUB_OUTPUT"
 
