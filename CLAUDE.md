@@ -68,10 +68,11 @@ self-hosted è offline/incompatibile).
 - Una build senza `TAURI_SIGNING_PRIVATE_KEY` disabilita via `--config` soltanto gli artefatti
   updater: gli installer ordinari vengono comunque prodotti. `publish_release=true` senza
   chiave fallisce invece prima della build, perché una release updater non firmata è invalida.
-- Notifica Telegram tramite l'azione `GabryXnLab/ci-bot/notify@main` (repo privato, bot
-  `@BobCI_bot` dedicato alla CI), best-effort: bundle come file se il job riesce, altrimenti
-  messaggio con il pulsante «🔁 Rilancia». L'azione è raggiungibile solo perché i chiamanti
-  sono repo privati dell'org (vedi `CLAUDE.md` di `ci-bot`).
+- Notifica Telegram tramite l'azione `GabryXnLab/build-kit/notify@main`, copia pubblica di
+  quella di `ci-bot` (che resta privato insieme al bot `@BobCI_bot`), best-effort: bundle come
+  file se il job riesce, altrimenti messaggio con il pulsante «🔁 Rilancia». Deve essere
+  pubblica perché questo repo è pubblico e un repo pubblico non può usare azioni di repo
+  privati. Token e chat arrivano dai secret del chiamante; senza, non parte niente.
 - Gli step di notifica sono **tre**: `setup` (solo fallimenti: senza matrice il resto viene
   saltato), un messaggio per target in `build`, la release updater in `publish`. L'azione gira
   dalla radice del workspace, non da `project_dir`: i pattern dei file lo includono.

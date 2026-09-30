@@ -243,7 +243,7 @@ jobs:
       # Se la matrice non si risolve, build e publish vengono saltati e non notificherebbero.
       - name: Notify failure via Telegram
         if: ${{ failure() || cancelled() }}
-        uses: GabryXnLab/ci-bot/notify@main
+        uses: GabryXnLab/build-kit/notify@main
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -269,7 +269,7 @@ jobs:
       # «In corso» con ⏹ Annulla (ci-bot); lo step finale riscrive lo stesso messaggio.
       - name: Notify start via Telegram
         id: started
-        uses: GabryXnLab/ci-bot/notify@main
+        uses: GabryXnLab/build-kit/notify@main
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -386,12 +386,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-      # Esito sempre (azione e bot in GabryXnLab/ci-bot): un file per ciascun formato di bundle
+      # Esito sempre (azione in GabryXnLab/build-kit, bot ci-bot): un file per ciascun formato di bundle
       # se il job riesce, altrimenti il pulsante per rilanciare il run. Best-effort.
       # L'azione gira dalla radice del workspace, non da project_dir: i pattern lo includono.
       - name: Notify via Telegram
         if: ${{ always() }}
-        uses: GabryXnLab/ci-bot/notify@main
+        uses: GabryXnLab/build-kit/notify@main
         with:
           message_id: ${{ steps.started.outputs.message_id }}
           run_inputs: ${{ toJSON(github.event.inputs) }}
@@ -522,7 +522,7 @@ jobs:
 
       - name: Notify via Telegram
         if: ${{ always() }}
-        uses: GabryXnLab/ci-bot/notify@main
+        uses: GabryXnLab/build-kit/notify@main
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
