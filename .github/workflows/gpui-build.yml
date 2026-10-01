@@ -230,14 +230,15 @@ jobs:
         with:
           workspaces: ${{ inputs.project_dir }} -> target
 
-      # GPUI su Linux: X11 e Wayland (xkbcommon), font (fontconfig), Vulkan (wgpu).
+      # GPUI su Linux: X11 e Wayland (xkbcommon), font (fontconfig), Vulkan (wgpu); DBus per il
+      # portachiavi (Secret Service, crate keyring).
       - name: Install Linux system deps (GPUI)
         if: ${{ matrix.os == 'linux' && matrix.apt == true }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
-            libfontconfig-dev libfreetype-dev libvulkan-dev libssl-dev pkg-config build-essential
+            libfontconfig-dev libfreetype-dev libvulkan-dev libdbus-1-dev libssl-dev pkg-config build-essential
 
       - name: Cargo build
         id: build
