@@ -1,0 +1,296 @@
+name: GPUI Build (reusable)
+
+# Workflow riusabile per app desktop Rust NATIVE disegnate con GPUI (gpui-kit/gpui-component),
+# fratello di `tauri-build.yml`: stessi input di scelta (runner_type, max_workers, clear_cache),
+# stessa validazione dei target, stesso build-kit per worker e cache, stesse notifiche.
+# Chiamato da thin wrapper nei progetti via:
+#   uses: GabryXnLab/desktop-ci/.github/workflows/gpui-build.yml@main
+#
+# Differenze da Tauri: niente frontend JS né WebView; il prodotto è un binario unico per
+# target (font e icone incorporati). Installer, firma e updater non sono ancora qui: per ora
+# l'artefatto è il binario compresso (tar.gz su Linux/macOS, zip su Windows).
+#
+# ⚠️ Build NATIVA per OS e architettura, come Tauri (target `platforms`, CSV):
+#   linux-x64 · linux-arm64 · windows · macos  (stessi alias di tauri-build.yml)
+# Con runner_type=self-hosted l'ambiente è Linux ARM64: gli altri target senza override
+# *_runner fanno fallire `setup` con errore esplicito e nessuna build parte.
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Nome app (artifact name e notifiche Telegram)'
+        required: true
+        type: string
+      bin_name:
+        description: 'Nome del binario prodotto da cargo (il [package].name del crate)'
+        required: true
+        type: string
+      platforms:
+        description: 'Target da buildare, CSV: es. "linux-x64,linux-arm64,windows,macos" (1 o più)'
+        required: true
+        type: string
+      runner_type:
+        description: 'self-hosted (runner propri) | github (runner GitHub-hosted)'
+        required: false
+        default: 'self-hosted'
+        type: string
+      project_dir:
+        description: 'Sottocartella del repo con il Cargo.toml dell''app'
+        required: false
+        default: 'desktop-native'
+        type: string
+      max_workers:
+        description: >-
+          Worker di Gradle/cargo (e di CMake) per questo run. auto = sul self-hosted le CPU libere
+          in quel momento, mai sotto 2; su GitHub tutte | 2 | 4. Stesso input, stessi valori e
+          stesso significato in flutter-ci, expo-ci e desktop-ci (GabryXnLab/build-kit).
+        required: false
+        default: 'auto'
+        type: string
+      clear_cache:
+        description: >-
+          Sul self-hosted cancella la cartella target di cargo del repo e, per questo run,
+          sccache ricompila e riscrive invece di fidarsi della cache condivisa. Su GitHub il
+          run non riprende né salva la cache di cargo.
+        required: false
+        default: false
+        type: boolean
+      build_debug:
+        description: 'true → profilo dev (veloce, con debuginfo). false → profilo `dist` del progetto (LTO completo).'
+        required: false
+        default: false
+        type: boolean
+      has_submodules:
+        description: 'true → checkout con submodules: recursive'
+        required: false
+        default: false
+        type: boolean
+      selfhosted_linux_runner:
+        description: 'runs-on per linux-arm64 self-hosted quando runner_type=self-hosted e nessun override (JSON array).'
+        required: false
+        default: '["self-hosted","nexus-core"]'
+        type: string
+      linux_x64_runner:
+        description: 'Override runs-on per linux-x64 (JSON array). Vuoto = default dal runner_type.'
+        required: false
+        default: ''
+        type: string
+      linux_arm64_runner:
+        description: 'Override runs-on per linux-arm64 (JSON array). Vuoto = default dal runner_type.'
+        required: false
+        default: ''
+        type: string
+      windows_runner:
+        description: 'Override runs-on per Windows (JSON array). Vuoto = default dal runner_type.'
+        required: false
+        default: ''
+        type: string
+      macos_runner:
+        description: 'Override runs-on per macOS (JSON array). Vuoto = default dal runner_type.'
+        required: false
+        default: ''
+        type: string
+      telegram_topic_id:
+        description: 'Topic del supergruppo Telegram per la notifica (message_thread_id). Vuoto = nessuna notifica.'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+      SUBMODULES_TOKEN:
+        required: false
+
+jobs:
+  setup:
+    name: Resolve & validate targets
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Build & validate matrix
+        id: gen
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          RUNNER_TYPE: ${{ inputs.runner_type }}
+          SELFHOSTED_LINUX: ${{ inputs.selfhosted_linux_runner }}
+          LINUX_X64_OVERRIDE: ${{ inputs.linux_x64_runner }}
+          LINUX_ARM64_OVERRIDE: ${{ inputs.linux_arm64_runner }}
+          WINDOWS_OVERRIDE: ${{ inputs.windows_runner }}
+          MACOS_OVERRIDE: ${{ inputs.macos_runner }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_TYPE" != "self-hosted" ] && [ "$RUNNER_TYPE" != "github" ]; then
+            echo "::error::runner_type non valido: '$RUNNER_TYPE' (attesi: self-hosted | github)"; exit 1
+          fi
+          toks=$(echo "$PLATFORMS" | tr 'A-Z' 'a-z' | tr ', ' '\n\n' | sed '/^$/d')
+          entries=""; incompat=""; seen=""
+          add() { # $1=os $2=arch $3=runner-json $4=apt
+            case " $seen " in *" $1-$2 "*) return 0 ;; esac
+            seen="$seen $1-$2"
+            local r; r=$(printf '{"os":"%s","arch":"%s","runner":%s,"apt":%s}' "$1" "$2" "$3" "$4")
+            if [ -z "$entries" ]; then entries="$r"; else entries="$entries,$r"; fi
+          }
+          while read -r p; do
+            case "$p" in
+              linux-x64|linux_x64|linux-x86_64|linux-amd64|x64|x86_64) target=linux-x64 ;;
+              linux|linux-arm64|linux_arm64|linux-aarch64|arm64|aarch64) target=linux-arm64 ;;
+              windows|win) target=windows ;;
+              macos|mac|darwin) target=macos ;;
+              *) echo "::warning::target ignoto '$p' ignorato"; continue ;;
+            esac
+            case "$target" in
+              linux-x64)
+                if [ -n "$LINUX_X64_OVERRIDE" ]; then add linux x64 "$LINUX_X64_OVERRIDE" true
+                elif [ "$RUNNER_TYPE" = "github" ]; then add linux x64 '["ubuntu-latest"]' true
+                else incompat="$incompat linux-x64"; fi ;;
+              linux-arm64)
+                if [ -n "$LINUX_ARM64_OVERRIDE" ]; then add linux arm64 "$LINUX_ARM64_OVERRIDE" true
+                elif [ "$RUNNER_TYPE" = "github" ]; then add linux arm64 '["ubuntu-24.04-arm"]' true
+                # Sul self-hosted le librerie di sistema sono già installate (nexus-core).
+                else add linux arm64 "$SELFHOSTED_LINUX" false; fi ;;
+              windows)
+                if [ -n "$WINDOWS_OVERRIDE" ]; then add windows x64 "$WINDOWS_OVERRIDE" false
+                elif [ "$RUNNER_TYPE" = "github" ]; then add windows x64 '["windows-latest"]' false
+                else incompat="$incompat windows"; fi ;;
+              macos)
+                if [ -n "$MACOS_OVERRIDE" ]; then add macos arm64 "$MACOS_OVERRIDE" false
+                elif [ "$RUNNER_TYPE" = "github" ]; then add macos arm64 '["macos-latest"]' false
+                else incompat="$incompat macos"; fi ;;
+            esac
+          done <<< "$toks"
+          if [ -n "$incompat" ]; then
+            echo "::error::runner_type=self-hosted ma i target [${incompat# }] NON sono compatibili con l'ambiente self-hosted (Linux ARM64). Usa 'runner = github' o passa un runner dedicato via *_runner. Nessuna build avviata."
+            exit 1
+          fi
+          if [ -z "$entries" ]; then
+            echo "::error::Nessun target valido in '$PLATFORMS' (attesi: linux-x64, linux-arm64, windows, macos)"; exit 1
+          fi
+          echo "matrix={\"include\":[$entries]}" >> "$GITHUB_OUTPUT"
+          echo "Matrix: {\"include\":[$entries]}"
+
+      - name: Notify failure via Telegram
+        if: ${{ failure() || cancelled() }}
+        uses: GabryXnLab/build-kit/notify@main
+        with:
+          run_inputs: ${{ toJSON(github.event.inputs) }}
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: ${{ job.status }}
+          title: ${{ inputs.app_name }}, risoluzione dei target
+
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.project_dir }}
+        shell: bash
+    steps:
+      - name: Notify start via Telegram
+        id: started
+        uses: GabryXnLab/build-kit/notify@main
+        with:
+          run_inputs: ${{ toJSON(github.event.inputs) }}
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: started
+          title: ${{ inputs.app_name }} ${{ matrix.os }}-${{ matrix.arch }}
+
+      - uses: actions/checkout@v4
+        with:
+          clean: ${{ !contains(toJSON(matrix.runner), 'self-hosted') }}
+          submodules: ${{ inputs.has_submodules && 'recursive' || 'false' }}
+          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
+
+      - name: Tune build
+        id: tune
+        uses: GabryXnLab/build-kit/setup@main
+        with:
+          runner: ${{ contains(toJSON(matrix.runner), 'self-hosted') && 'self-hosted' || 'github' }}
+          max_workers: ${{ inputs.max_workers }}
+          clear_cache: ${{ inputs.clear_cache }}
+          rust: 'true'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache (GitHub runner)
+        if: ${{ !contains(toJSON(matrix.runner), 'self-hosted') && inputs.clear_cache != true }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.project_dir }} -> target
+
+      # GPUI su Linux: X11 e Wayland (xkbcommon), font (fontconfig), Vulkan (wgpu).
+      - name: Install Linux system deps (GPUI)
+        if: ${{ matrix.os == 'linux' && matrix.apt == true }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
+            libfontconfig-dev libfreetype-dev libvulkan-dev libssl-dev pkg-config build-essential
+
+      - name: Cargo build
+        id: build
+        env:
+          CARGO_DIR: ${{ steps.tune.outputs.cargo_target_dir }}
+          BUILD_DEBUG: ${{ inputs.build_debug }}
+          BIN: ${{ inputs.bin_name }}
+          APP: ${{ inputs.app_name }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_DEBUG" = "true" ]; then profile=dev; outdir=debug; else profile=dist; outdir=dist; fi
+          cargo build --locked --profile "$profile"
+          target="${CARGO_DIR:-$GITHUB_WORKSPACE/${{ inputs.project_dir }}/target}"
+          ext=""; [ "$OS" = "windows" ] && ext=".exe"
+          bin="$target/$outdir/$BIN$ext"
+          test -f "$bin"
+          pkgdir="$GITHUB_WORKSPACE/gpui-out"
+          rm -rf "$pkgdir"; mkdir -p "$pkgdir"
+          name="$APP-$OS-$ARCH"
+          cp "$bin" "$pkgdir/"
+          if [ "$OS" = "windows" ]; then
+            (cd "$pkgdir" && 7z a -bd "$name.zip" "$BIN$ext" >/dev/null)
+          else
+            tar -C "$pkgdir" -czf "$pkgdir/$name.tar.gz" "$BIN"
+          fi
+          ls -la "$pkgdir"
+          echo "dir=$pkgdir" >> "$GITHUB_OUTPUT"
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then "$RUSTC_WRAPPER" --show-stats | grep -E 'Cache (hits|misses)' || true; fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.app_name }}-${{ matrix.os }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            ${{ steps.build.outputs.dir }}/*.tar.gz
+            ${{ steps.build.outputs.dir }}/*.zip
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Notify via Telegram
+        if: ${{ always() }}
+        uses: GabryXnLab/build-kit/notify@main
+        with:
+          message_id: ${{ steps.started.outputs.message_id }}
+          run_inputs: ${{ toJSON(github.event.inputs) }}
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: ${{ job.status }}
+          title: ${{ inputs.app_name }} ${{ matrix.os }}-${{ matrix.arch }}
+          files: |
+            gpui-out/*.tar.gz
+            gpui-out/*.zip
