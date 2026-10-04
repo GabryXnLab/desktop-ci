@@ -7,8 +7,18 @@ name: GPUI Build (reusable)
 #   uses: GabryXnLab/desktop-ci/.github/workflows/gpui-build.yml@main
 #
 # Differenze da Tauri: niente frontend JS né WebView; il prodotto è un binario unico per
-# target (font e icone incorporati). Installer, firma e updater non sono ancora qui: per ora
-# l'artefatto è il binario compresso (tar.gz su Linux/macOS, zip su Windows).
+# target (font e icone incorporati), compresso (tar.gz su Linux/macOS, zip su Windows).
+#
+# Pacchetti (`package: true`): `cargo packager` (crabnebula-dev/cargo-packager, lo stesso
+# bundler di Tauri estratto in uno strumento a sé) legge `[package.metadata.packager]` del
+# Cargo.toml del progetto e produce deb + AppImage (Linux), installer NSIS (Windows), app +
+# dmg (macOS). Con la chiave dell'updater (secret TAURI_SIGNING_*, stesso formato minisign
+# di Tauri) ogni pacchetto ha il suo `.sig`.
+#
+# Pubblicazione (`publish_release: true`): release `<release_tag_prefix><versione>` su
+# `releases_repo` coi pacchetti; il manifest dell'updater lo scrive `manifest_command` del
+# progetto (manifest per canale, release a tag fisso) o, senza, un `latest.json` di Tauri v2
+# nella release stessa.
 #
 # ⚠️ Build NATIVA per OS e architettura, come Tauri (target `platforms`, CSV):
 #   linux-x64 · linux-arm64 · windows · macos  (stessi alias di tauri-build.yml)
@@ -96,12 +106,64 @@ on:
         required: false
         default: ''
         type: string
+      package:
+        description: 'true → anche i pacchetti con cargo-packager (config in [package.metadata.packager] del Cargo.toml): deb+AppImage, NSIS, app+dmg. Firmati per l''updater se c''è TAURI_SIGNING_PRIVATE_KEY.'
+        required: false
+        default: false
+        type: boolean
+      cargo_packager_version:
+        description: 'Versione di cargo-packager (fissata: un bundler nuovo cambia i pacchetti).'
+        required: false
+        default: '0.11.8'
+        type: string
+      publish_release:
+        description: 'true → dopo la build pubblica i pacchetti firmati su releases_repo (richiede package, build_debug=false, TAURI_SIGNING_* e RELEASES_TOKEN).'
+        required: false
+        default: false
+        type: boolean
+      releases_repo:
+        description: '[Publish] owner/repo pubblico delle release (l''updater scarica senza autenticazione).'
+        required: false
+        default: ''
+        type: string
+      release_tag_prefix:
+        description: '[Publish] Prefisso del tag della release: <prefisso><versione del Cargo.toml>.'
+        required: false
+        default: 'v'
+        type: string
+      make_latest:
+        description: '[Publish] La release diventa la «latest» del repo. false se un''altra app pubblica lì il suo latest.json (es. la desktop Tauri durante la migrazione).'
+        required: false
+        default: true
+        type: boolean
+      manifest_command:
+        description: >-
+          [Publish] Comando del progetto (bash, dalla root del repo) che scrive i manifest
+          dell'updater: riceve VERSION, ASSETS_DIR (una cartella packages-<os>-<arch> per target),
+          RELEASE_URL, PUB_DATE, NOTES_FILE e OUT_DIR, e scrive OUT_DIR/<tag>/latest.json per ogni
+          release a tag fisso (canale) da aggiornare. Vuoto = latest.json di Tauri v2 nella release.
+        required: false
+        default: ''
+        type: string
+      release_notes:
+        description: '[Publish] Note della release. Vuoto = «<app_name> <tag>».'
+        required: false
+        default: ''
+        type: string
     secrets:
       TELEGRAM_BOT_TOKEN:
         required: false
       TELEGRAM_CHAT_ID:
         required: false
       SUBMODULES_TOKEN:
+        required: false
+      # Chiave minisign dell'updater, nel formato di `tauri signer generate` / `cargo packager signer generate`.
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+      # PAT con Contents: Read & Write sul solo releases_repo.
+      RELEASES_TOKEN:
         required: false
 
 jobs:
@@ -121,6 +183,12 @@ jobs:
           LINUX_ARM64_OVERRIDE: ${{ inputs.linux_arm64_runner }}
           WINDOWS_OVERRIDE: ${{ inputs.windows_runner }}
           MACOS_OVERRIDE: ${{ inputs.macos_runner }}
+          PUBLISH: ${{ inputs.publish_release }}
+          PACKAGE: ${{ inputs.package }}
+          BUILD_DEBUG: ${{ inputs.build_debug }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          HAS_RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN != '' }}
         run: |
           set -euo pipefail
           if [ "$RUNNER_TYPE" != "self-hosted" ] && [ "$RUNNER_TYPE" != "github" ]; then
@@ -168,6 +236,14 @@ jobs:
           fi
           if [ -z "$entries" ]; then
             echo "::error::Nessun target valido in '$PLATFORMS' (attesi: linux-x64, linux-arm64, windows, macos)"; exit 1
+          fi
+          # Una pubblicazione si ferma qui, prima di qualunque build, se manca un pezzo.
+          if [ "$PUBLISH" = "true" ]; then
+            [ "$PACKAGE" = "true" ] || { echo "::error::publish_release=true richiede package=true"; exit 1; }
+            [ "$BUILD_DEBUG" != "true" ] || { echo "::error::publish_release=true richiede build_debug=false"; exit 1; }
+            [ -n "$RELEASES_REPO" ] || { echo "::error::publish_release=true richiede releases_repo"; exit 1; }
+            [ "$HAS_KEY" = "true" ] || { echo "::error::publish_release=true richiede il secret TAURI_SIGNING_PRIVATE_KEY: non si pubblica un updater non firmato"; exit 1; }
+            [ "$HAS_RELEASES_TOKEN" = "true" ] || { echo "::error::publish_release=true richiede il secret RELEASES_TOKEN"; exit 1; }
           fi
           echo "matrix={\"include\":[$entries]}" >> "$GITHUB_OUTPUT"
           echo "Matrix: {\"include\":[$entries]}"
@@ -231,14 +307,14 @@ jobs:
           workspaces: ${{ inputs.project_dir }} -> target
 
       # GPUI su Linux: X11 e Wayland (xkbcommon), font (fontconfig), Vulkan (wgpu); DBus per il
-      # portachiavi (Secret Service, crate keyring).
+      # portachiavi (Secret Service, crate keyring); GTK 3 per l'icona di sistema (crate gtk/tray-icon).
       - name: Install Linux system deps (GPUI)
         if: ${{ matrix.os == 'linux' && matrix.apt == true }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
-            libfontconfig-dev libfreetype-dev libvulkan-dev libdbus-1-dev libssl-dev pkg-config build-essential
+            libfontconfig-dev libfreetype-dev libvulkan-dev libdbus-1-dev libgtk-3-dev libssl-dev pkg-config build-essential
 
       - name: Cargo build
         id: build
@@ -270,6 +346,69 @@ jobs:
           echo "dir=$pkgdir" >> "$GITHUB_OUTPUT"
           if [ -n "${RUSTC_WRAPPER:-}" ]; then "$RUSTC_WRAPPER" --show-stats | grep -E 'Cache (hits|misses)' || true; fi
 
+      # Sul self-hosted lo strumento resta in ~/ci/tools, una versione per cartella; su GitHub si
+      # compila nel run (~3 min). Fuori dalla target del progetto: cargo install non deve toccarla.
+      - name: Install cargo-packager
+        if: ${{ inputs.package }}
+        env:
+          VERSION: ${{ inputs.cargo_packager_version }}
+          SELF_HOSTED: ${{ contains(toJSON(matrix.runner), 'self-hosted') }}
+        run: |
+          set -euo pipefail
+          if [ "$SELF_HOSTED" = "true" ]; then root="$HOME/ci/tools/cargo-packager-$VERSION"; else root="$RUNNER_TEMP/cargo-packager"; fi
+          if [ ! -x "$root/bin/cargo-packager" ] && [ ! -x "$root/bin/cargo-packager.exe" ]; then
+            CARGO_TARGET_DIR="$RUNNER_TEMP/cargo-packager-build" cargo install cargo-packager --locked --version "$VERSION" --root "$root"
+          fi
+          echo "$root/bin" >> "$GITHUB_PATH"
+
+      - name: Package
+        id: package
+        if: ${{ inputs.package }}
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          BUILD_DEBUG: ${{ inputs.build_debug }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "$OS" in
+            linux) formats=deb,appimage ;;
+            windows) formats=nsis ;;
+            macos) formats=app,dmg ;;
+          esac
+          # cargo-packager cerca il binario in target/<profilo>: «debug» per il profilo dev.
+          profile=dist; [ "$BUILD_DEBUG" = "true" ] && profile=debug
+          args=(--profile "$profile" --formats "$formats")
+          if [ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]; then
+            # Una variabile vuota la leggerebbe come chiave: senza secret i pacchetti escono senza .sig.
+            unset CARGO_PACKAGER_SIGN_PRIVATE_KEY CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD
+            echo "::warning::nessuna TAURI_SIGNING_PRIVATE_KEY: pacchetti senza firma dell'updater"
+          elif [ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD" ]; then
+            # Senza password esplicita cargo-packager la chiederebbe sul terminale.
+            unset CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD
+            args+=(--password "")
+          fi
+          pkgdir="$GITHUB_WORKSPACE/gpui-packages/packages-$OS-$ARCH"
+          rm -rf "$GITHUB_WORKSPACE/gpui-packages"; mkdir -p "$pkgdir"
+          # L'AppImage si monta con FUSE, che sui runner (e nei container) spesso non c'è.
+          APPIMAGE_EXTRACT_AND_RUN=1 cargo packager "${args[@]}" --out-dir "$pkgdir"
+          # Restano solo i file: gli intermedi (.cargo-packager/) e le cartelle .app (su macOS conta il dmg) no.
+          find "$pkgdir" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          ls -la "$pkgdir"
+          echo "dir=$pkgdir" >> "$GITHUB_OUTPUT"
+
+      # Bloccante solo quando lo scarica il job di pubblicazione (regola di build-kit).
+      - name: Upload packages
+        if: ${{ inputs.package }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: ${{ !inputs.publish_release }}
+        with:
+          name: packages-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ steps.package.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         continue-on-error: true
@@ -295,3 +434,128 @@ jobs:
           files: |
             gpui-out/*.tar.gz
             gpui-out/*.zip
+            gpui-packages/*/*.deb
+            gpui-packages/*/*.AppImage
+            gpui-packages/*/*.exe
+            gpui-packages/*/*.dmg
+
+  # PUBLISH — solo con publish_release e build non-debug, dopo TUTTA la matrice (needs: build:
+  # un target fallito salta la pubblicazione, niente release parziali). Prima la release
+  # versionata coi pacchetti, poi i manifest: un manifest non punta mai a un file che non c'è.
+  publish:
+    name: Publish updater release
+    needs: build
+    if: ${{ inputs.publish_release == true && inputs.build_debug == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify start via Telegram
+        id: started
+        uses: GabryXnLab/build-kit/notify@main
+        with:
+          run_inputs: ${{ toJSON(github.event.inputs) }}
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: started
+          title: ${{ inputs.app_name }}, pubblicazione su ${{ inputs.releases_repo }}
+
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        env:
+          PROJECT_DIR: ${{ inputs.project_dir }}
+          BIN: ${{ inputs.bin_name }}
+          PREFIX: ${{ inputs.release_tag_prefix }}
+        run: |
+          set -euo pipefail
+          v=$(cargo metadata --no-deps --format-version 1 --manifest-path "$PROJECT_DIR/Cargo.toml" | jq -r --arg n "$BIN" '.packages[] | select(.name == $n) | .version')
+          if [ -z "$v" ] || [ "$v" = "null" ]; then echo "::error::versione di $BIN non trovata in $PROJECT_DIR/Cargo.toml"; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=$PREFIX$v" >> "$GITHUB_OUTPUT"
+          case "$v" in *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: assets
+
+      - name: Manifests
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
+          MANIFEST_COMMAND: ${{ inputs.manifest_command }}
+          NOTES: ${{ inputs.release_notes }}
+          APP: ${{ inputs.app_name }}
+        run: |
+          set -euo pipefail
+          export ASSETS_DIR="$GITHUB_WORKSPACE/assets" OUT_DIR="$GITHUB_WORKSPACE/channels" NOTES_FILE="$RUNNER_TEMP/notes.md"
+          export RELEASE_URL="https://github.com/$RELEASES_REPO/releases/download/$TAG"
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ); export PUB_DATE
+          printf '%s\n' "${NOTES:-$APP $TAG}" > "$NOTES_FILE"
+          mkdir -p "$OUT_DIR" release-assets
+          find assets -type f -exec cp {} release-assets/ \;
+          if [ -n "$MANIFEST_COMMAND" ]; then
+            bash -c "$MANIFEST_COMMAND"
+          else
+            platforms='{}'
+            while IFS= read -r -d '' sig; do
+              pkg="${sig%.sig}"; [ -f "$pkg" ] || continue
+              dir=$(basename "$(dirname "$sig")")
+              case "${dir#packages-}" in
+                linux-x64) k=linux-x86_64 ;; linux-arm64) k=linux-aarch64 ;;
+                windows-x64) k=windows-x86_64 ;; macos-arm64) k=darwin-aarch64 ;; *) continue ;;
+              esac
+              case "$pkg" in *.deb) k="$k-deb" ;; *.app.tar.gz) continue ;; esac
+              name=$(basename "$pkg" | tr ' ' '.')
+              platforms=$(jq --arg k "$k" --arg url "$RELEASE_URL/$name" --arg sig "$(cat "$sig")" '. + {($k): {signature: $sig, url: $url}}' <<< "$platforms")
+            done < <(find assets -type f -name '*.sig' -print0)
+            [ "$platforms" != '{}' ] || { echo "::error::nessun pacchetto firmato (.sig) fra gli artefatti"; exit 1; }
+            jq -n --arg v "$VERSION" --arg n "$(cat "$NOTES_FILE")" --arg d "$PUB_DATE" --argjson p "$platforms" \
+              '{version: $v, notes: $n, pub_date: $d, platforms: $p}' > release-assets/latest.json
+          fi
+          ls -la release-assets "$OUT_DIR"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+          MAKE_LATEST: ${{ inputs.make_latest && steps.ver.outputs.prerelease != 'true' }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
+          APP: ${{ inputs.app_name }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+          if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --repo "$RELEASES_REPO" --clobber
+          else
+            flags=(--title "$APP $TAG" --notes-file "$notes" --latest="$MAKE_LATEST")
+            [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+            gh release create "$TAG" release-assets/* --repo "$RELEASES_REPO" "${flags[@]}"
+          fi
+          # Le release dei canali sono pre-release a tag fisso: mai la «latest» del repo.
+          for dir in channels/*/; do
+            [ -d "$dir" ] || continue
+            ctag=$(basename "$dir")
+            if ! gh release view "$ctag" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+              gh release create "$ctag" --repo "$RELEASES_REPO" --prerelease --latest=false \
+                --title "$APP, canale $ctag" --notes "Manifest dell'updater del canale, riscritto a ogni pubblicazione. I pacchetti stanno nelle release versionate."
+            fi
+            gh release upload "$ctag" "$dir"* --repo "$RELEASES_REPO" --clobber
+            echo "canale $ctag → $TAG"
+          done
+
+      - name: Notify via Telegram
+        if: ${{ always() }}
+        uses: GabryXnLab/build-kit/notify@main
+        with:
+          message_id: ${{ steps.started.outputs.message_id }}
+          run_inputs: ${{ toJSON(github.event.inputs) }}
+          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          topic_id: ${{ inputs.telegram_topic_id }}
+          status: ${{ job.status }}
+          title: ${{ inputs.app_name }}, release ${{ steps.ver.outputs.tag }} su ${{ inputs.releases_repo }}

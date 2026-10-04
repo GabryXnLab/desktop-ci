@@ -111,3 +111,16 @@ senza bisogno di infrastruttura server aggiuntiva. `RELEASES_TOKEN` è un PAT de
 ## Estensioni future
 
 - Firma/notarization macOS, code-signing Windows: aggiungere secret + step qui (non nei wrapper).
+
+## `gpui-build.yml`: pacchetti e pubblicazione
+
+- **`package`**: `cargo packager` (versione fissata in `cargo_packager_version`, installato in
+  `~/ci/tools/cargo-packager-<versione>` sul self-hosted, nel temp del run su GitHub) con la config
+  `[package.metadata.packager]` del progetto: deb + AppImage su Linux, NSIS su Windows, app + dmg su
+  macOS. Con `TAURI_SIGNING_PRIVATE_KEY` (stesso formato minisign di Tauri) ogni pacchetto ha il suo
+  `.sig`. Artefatto `packages-<os>-<arch>`, bloccante solo con `publish_release`.
+- **`publish_release`**: validato in `setup` (package, non debug, repo, chiave, token) prima di
+  qualunque build; il job `publish` crea la release `<release_tag_prefix><versione del Cargo.toml>`
+  (`make_latest`, pre-release se la versione ha un `-`), poi i manifest: con `manifest_command`
+  li scrive il progetto in `OUT_DIR/<tag>/latest.json` e qui si caricano nelle release a tag fisso
+  (pre-release, mai «latest»); senza, un `latest.json` di Tauri v2 nella release stessa.
