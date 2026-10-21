@@ -39,8 +39,8 @@ sul runner nativo (`runs-on: matrix.runner`). Target: `linux-x64`, `linux-arm64`
   Windows/macOS dedicato → bypassa l'errore).
 
 La matrix (`{os, runner, bundle_glob, apt}`) è generata in `setup` e consumata da `build`
-(`runs-on: matrix.runner`). `setup` gira su `ubuntu-latest` (sempre disponibile, anche se il
-self-hosted è offline/incompatibile).
+(`runs-on: matrix.runner`). `setup` gira su `ubuntu-slim` (GitHub-hosted: `ubuntu-latest` non
+finisce più su nexus-core, e deve funzionare anche se il self-hosted è offline/incompatibile).
 
 ## Velocità sul self-hosted (con `GabryXnLab/build-kit`)
 
@@ -124,3 +124,13 @@ senza bisogno di infrastruttura server aggiuntiva. `RELEASES_TOKEN` è un PAT de
   (`make_latest`, pre-release se la versione ha un `-`), poi i manifest: con `manifest_command`
   li scrive il progetto in `OUT_DIR/<tag>/latest.json` e qui si caricano nelle release a tag fisso
   (pre-release, mai «latest»); senza, un `latest.json` di Tauri v2 nella release stessa.
+
+## `runner_type: auto` (in sviluppo sul branch `auto-runner`, solo `gpui-build.yml`)
+
+Per ogni target Linux `setup` chiama `build-kit/pick-runner` (`target_arch` arm64/x64; token `RUNNER_PICK_TOKEN`):
+linux-arm64 = nexus-core o Ubicloud arm, linux-x64 = ohos o Ubicloud x64; windows/macos come `github`. Ogni
+riga della matrix porta `setup` (valore di `runner` per `build-kit/setup`: self-hosted|ohos|ubicloud|github),
+`remote` (cache remota, solo runner scelti da `auto` fuori da nexus) e `selfhosted`; gli step non guardano
+più `runs-on` ma questi campi. `BUILD_CACHE_S3` arriva solo agli effimeri. `allow` e `ubicloud_size` sono
+input di prova/taratura. Il profilo ohos non ha ancora la toolchain Nix (fase 2b): una build su ohos manca di
+Rust/librerie. Le firme dell'updater sono già secret di repo (`TAURI_SIGNING_*`): nessun file di macchina.

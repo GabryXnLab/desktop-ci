@@ -41,7 +41,10 @@ on:
         required: true
         type: string
       runner_type:
-        description: 'self-hosted (runner propri) | github (runner GitHub-hosted)'
+        description: >-
+          self-hosted (runner propri) | github (runner GitHub-hosted) | auto (per ogni target Linux
+          sceglie build-kit/pick-runner: linux-arm64 = nexus-core o Ubicloud arm, linux-x64 = ohos o
+          Ubicloud x64; windows e macos come github)
         required: false
         default: 'self-hosted'
         type: string
@@ -100,6 +103,16 @@ on:
         description: 'Override runs-on per macOS (JSON array). Vuoto = default dal runner_type.'
         required: false
         default: ''
+        type: string
+      allow:
+        description: 'Solo runner_type=auto: livelli ammessi a pick-runner, in virgola (nexus,ohos,ubicloud). Serve a forzare Ubicloud nei collaudi.'
+        required: false
+        default: 'nexus,ohos,ubicloud'
+        type: string
+      ubicloud_size:
+        description: 'Solo runner_type=auto: vCPU di ubicloud-standard-<N>.'
+        required: false
+        default: '8'
         type: string
       telegram_topic_id:
         description: 'Topic del supergruppo Telegram per la notifica (message_thread_id). Vuoto = nessuna notifica.'
@@ -165,17 +178,72 @@ on:
       # PAT con Contents: Read & Write sul solo releases_repo.
       RELEASES_TOKEN:
         required: false
+      # Solo runner_type=auto: PAT di pick-runner e credenziali del bucket della cache remota (testo del .env).
+      RUNNER_PICK_TOKEN:
+        required: false
+      BUILD_CACHE_S3:
+        required: false
 
 jobs:
   setup:
     name: Resolve & validate targets
-    runs-on: ubuntu-latest
+    # ubuntu-slim: ubuntu-latest non finisce più su nexus-core (etichetta tolta) e qui basta bash/python.
+    runs-on: ubuntu-slim
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
+      - name: Normalize targets
+        id: norm
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          out=""
+          while read -r p; do
+            case "$p" in
+              linux-x64|linux_x64|linux-x86_64|linux-amd64|x64|x86_64) t=linux-x64 ;;
+              linux|linux-arm64|linux_arm64|linux-aarch64|arm64|aarch64) t=linux-arm64 ;;
+              windows|win) t=windows ;;
+              macos|mac|darwin) t=macos ;;
+              *) echo "::warning::target ignoto '$p' ignorato"; continue ;;
+            esac
+            case " $out " in *" $t "*) ;; *) out="$out $t" ;; esac
+          done < <(echo "$PLATFORMS" | tr 'A-Z' 'a-z' | tr ', ' '\n\n' | sed '/^$/d')
+          echo "targets=${out# }" >> "$GITHUB_OUTPUT"
+          echo "arm64=$(case " $out " in *" linux-arm64 "*) echo true ;; *) echo false ;; esac)" >> "$GITHUB_OUTPUT"
+          echo "x64=$(case " $out " in *" linux-x64 "*) echo true ;; *) echo false ;; esac)" >> "$GITHUB_OUTPUT"
+
+      - name: Pick runner (linux-arm64)
+        id: pick_arm64
+        if: ${{ inputs.runner_type == 'auto' && steps.norm.outputs.arm64 == 'true' && inputs.linux_arm64_runner == '' }}
+        uses: GabryXnLab/build-kit/pick-runner@auto-runner
+        with:
+          token: ${{ secrets.RUNNER_PICK_TOKEN }}
+          repos: kagami-private,Riftgate,ascend
+          ubicloud_size: ${{ inputs.ubicloud_size }}
+          target_arch: arm64
+          allow: ${{ inputs.allow }}
+
+      - name: Pick runner (linux-x64)
+        id: pick_x64
+        if: ${{ inputs.runner_type == 'auto' && steps.norm.outputs.x64 == 'true' && inputs.linux_x64_runner == '' }}
+        uses: GabryXnLab/build-kit/pick-runner@auto-runner
+        with:
+          token: ${{ secrets.RUNNER_PICK_TOKEN }}
+          repos: kagami-private,Riftgate,ascend
+          ubicloud_size: ${{ inputs.ubicloud_size }}
+          target_arch: x64
+          allow: ${{ inputs.allow }}
+          jitter: 'false'
+
       - name: Build & validate matrix
         id: gen
         env:
+          TARGETS: ${{ steps.norm.outputs.targets }}
+          PICK_ARM64_RUNS_ON: ${{ steps.pick_arm64.outputs.runs_on }}
+          PICK_ARM64_PROFILE: ${{ steps.pick_arm64.outputs.profile }}
+          PICK_X64_RUNS_ON: ${{ steps.pick_x64.outputs.runs_on }}
+          PICK_X64_PROFILE: ${{ steps.pick_x64.outputs.profile }}
           PLATFORMS: ${{ inputs.platforms }}
           RUNNER_TYPE: ${{ inputs.runner_type }}
           SELFHOSTED_LINUX: ${{ inputs.selfhosted_linux_runner }}
@@ -191,45 +259,51 @@ jobs:
           HAS_RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN != '' }}
         run: |
           set -euo pipefail
-          if [ "$RUNNER_TYPE" != "self-hosted" ] && [ "$RUNNER_TYPE" != "github" ]; then
-            echo "::error::runner_type non valido: '$RUNNER_TYPE' (attesi: self-hosted | github)"; exit 1
+          if [ "$RUNNER_TYPE" != "self-hosted" ] && [ "$RUNNER_TYPE" != "github" ] && [ "$RUNNER_TYPE" != "auto" ]; then
+            echo "::error::runner_type non valido: '$RUNNER_TYPE' (attesi: self-hosted | github | auto)"; exit 1
           fi
-          toks=$(echo "$PLATFORMS" | tr 'A-Z' 'a-z' | tr ', ' '\n\n' | sed '/^$/d')
           entries=""; incompat=""; seen=""
-          add() { # $1=os $2=arch $3=runner-json $4=apt
+          # setup = valore di `runner` per build-kit/setup (self-hosted | ohos | ubicloud | github);
+          # remote = cache remota S3 (solo runner scelti da `auto` fuori da nexus).
+          add() { # $1=os $2=arch $3=runner-json $4=apt [$5=setup $6=remote]
             case " $seen " in *" $1-$2 "*) return 0 ;; esac
             seen="$seen $1-$2"
-            local r; r=$(printf '{"os":"%s","arch":"%s","runner":%s,"apt":%s}' "$1" "$2" "$3" "$4")
+            local sh=false setup="${5:-}" remote="${6:-false}"
+            case "$3" in *self-hosted*) sh=true ;; esac
+            if [ -z "$setup" ]; then if [ "$sh" = true ]; then setup=self-hosted; else setup=github; fi; fi
+            local r; r=$(printf '{"os":"%s","arch":"%s","runner":%s,"apt":%s,"setup":"%s","remote":%s,"selfhosted":%s}' "$1" "$2" "$3" "$4" "$setup" "$remote" "$sh")
             if [ -z "$entries" ]; then entries="$r"; else entries="$entries,$r"; fi
           }
-          while read -r p; do
-            case "$p" in
-              linux-x64|linux_x64|linux-x86_64|linux-amd64|x64|x86_64) target=linux-x64 ;;
-              linux|linux-arm64|linux_arm64|linux-aarch64|arm64|aarch64) target=linux-arm64 ;;
-              windows|win) target=windows ;;
-              macos|mac|darwin) target=macos ;;
-              *) echo "::warning::target ignoto '$p' ignorato"; continue ;;
+          add_picked() { # $1=arch $2=runs_on $3=profile
+            case "$3" in
+              nexus) add linux "$1" "$2" false self-hosted false ;;
+              ohos) add linux "$1" "$2" false ohos true ;;
+              *) add linux "$1" "$2" true ubicloud true ;;
             esac
+          }
+          for target in $TARGETS; do
             case "$target" in
               linux-x64)
                 if [ -n "$LINUX_X64_OVERRIDE" ]; then add linux x64 "$LINUX_X64_OVERRIDE" true
                 elif [ "$RUNNER_TYPE" = "github" ]; then add linux x64 '["ubuntu-latest"]' true
+                elif [ "$RUNNER_TYPE" = "auto" ]; then add_picked x64 "$PICK_X64_RUNS_ON" "$PICK_X64_PROFILE"
                 else incompat="$incompat linux-x64"; fi ;;
               linux-arm64)
                 if [ -n "$LINUX_ARM64_OVERRIDE" ]; then add linux arm64 "$LINUX_ARM64_OVERRIDE" true
                 elif [ "$RUNNER_TYPE" = "github" ]; then add linux arm64 '["ubuntu-24.04-arm"]' true
+                elif [ "$RUNNER_TYPE" = "auto" ]; then add_picked arm64 "$PICK_ARM64_RUNS_ON" "$PICK_ARM64_PROFILE"
                 # Sul self-hosted le librerie di sistema sono già installate (nexus-core).
                 else add linux arm64 "$SELFHOSTED_LINUX" false; fi ;;
               windows)
                 if [ -n "$WINDOWS_OVERRIDE" ]; then add windows x64 "$WINDOWS_OVERRIDE" false
-                elif [ "$RUNNER_TYPE" = "github" ]; then add windows x64 '["windows-latest"]' false
+                elif [ "$RUNNER_TYPE" != "self-hosted" ]; then add windows x64 '["windows-latest"]' false
                 else incompat="$incompat windows"; fi ;;
               macos)
                 if [ -n "$MACOS_OVERRIDE" ]; then add macos arm64 "$MACOS_OVERRIDE" false
-                elif [ "$RUNNER_TYPE" = "github" ]; then add macos arm64 '["macos-latest"]' false
+                elif [ "$RUNNER_TYPE" != "self-hosted" ]; then add macos arm64 '["macos-latest"]' false
                 else incompat="$incompat macos"; fi ;;
             esac
-          done <<< "$toks"
+          done
           if [ -n "$incompat" ]; then
             echo "::error::runner_type=self-hosted ma i target [${incompat# }] NON sono compatibili con l'ambiente self-hosted (Linux ARM64). Usa 'runner = github' o passa un runner dedicato via *_runner. Nessuna build avviata."
             exit 1
@@ -250,7 +324,7 @@ jobs:
 
       - name: Notify failure via Telegram
         if: ${{ failure() || cancelled() }}
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@auto-runner
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -273,7 +347,7 @@ jobs:
     steps:
       - name: Notify start via Telegram
         id: started
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@auto-runner
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -284,24 +358,26 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          clean: ${{ !contains(toJSON(matrix.runner), 'self-hosted') }}
+          clean: ${{ !matrix.selfhosted }}
           submodules: ${{ inputs.has_submodules && 'recursive' || 'false' }}
           token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
 
       - name: Tune build
         id: tune
-        uses: GabryXnLab/build-kit/setup@main
+        uses: GabryXnLab/build-kit/setup@auto-runner
         with:
-          runner: ${{ contains(toJSON(matrix.runner), 'self-hosted') && 'self-hosted' || 'github' }}
+          runner: ${{ matrix.setup }}
           max_workers: ${{ inputs.max_workers }}
           clear_cache: ${{ inputs.clear_cache }}
           rust: 'true'
+          remote_cache: ${{ matrix.remote }}
+          cache_env: ${{ matrix.setup == 'ubicloud' && secrets.BUILD_CACHE_S3 || '' }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cargo cache (GitHub runner)
-        if: ${{ !contains(toJSON(matrix.runner), 'self-hosted') && inputs.clear_cache != true }}
+        if: ${{ !matrix.selfhosted && inputs.clear_cache != true }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ inputs.project_dir }} -> target
@@ -352,7 +428,7 @@ jobs:
         if: ${{ inputs.package }}
         env:
           VERSION: ${{ inputs.cargo_packager_version }}
-          SELF_HOSTED: ${{ contains(toJSON(matrix.runner), 'self-hosted') }}
+          SELF_HOSTED: ${{ matrix.selfhosted }}
         run: |
           set -euo pipefail
           if [ "$SELF_HOSTED" = "true" ]; then root="$HOME/ci/tools/cargo-packager-$VERSION"; else root="$RUNNER_TEMP/cargo-packager"; fi
@@ -422,7 +498,7 @@ jobs:
 
       - name: Notify via Telegram
         if: ${{ always() }}
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@auto-runner
         with:
           message_id: ${{ steps.started.outputs.message_id }}
           run_inputs: ${{ toJSON(github.event.inputs) }}
@@ -450,7 +526,7 @@ jobs:
     steps:
       - name: Notify start via Telegram
         id: started
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@auto-runner
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -550,7 +626,7 @@ jobs:
 
       - name: Notify via Telegram
         if: ${{ always() }}
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@auto-runner
         with:
           message_id: ${{ steps.started.outputs.message_id }}
           run_inputs: ${{ toJSON(github.event.inputs) }}
