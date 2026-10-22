@@ -125,7 +125,7 @@ senza bisogno di infrastruttura server aggiuntiva. `RELEASES_TOKEN` è un PAT de
   li scrive il progetto in `OUT_DIR/<tag>/latest.json` e qui si caricano nelle release a tag fisso
   (pre-release, mai «latest»); senza, un `latest.json` di Tauri v2 nella release stessa.
 
-## `runner_type: auto` (in sviluppo sul branch `auto-runner`, solo `gpui-build.yml`)
+## `runner_type: auto` (solo `gpui-build.yml`)
 
 Per ogni target Linux `setup` chiama `build-kit/pick-runner` (`target_arch` arm64/x64; token `RUNNER_PICK_TOKEN`):
 linux-arm64 = nexus-core o Ubicloud arm, linux-x64 = ohos o Ubicloud x64; windows/macos come `github`. Ogni
