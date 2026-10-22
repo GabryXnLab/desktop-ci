@@ -274,7 +274,7 @@ jobs:
           fi
           entries=""; incompat=""; seen=""
           # setup = valore di `runner` per build-kit/setup (self-hosted | ohos | ubicloud | github);
-          # remote = cache remota S3 (solo runner scelti da `auto` fuori da nexus).
+          # remote = cache remota S3 (runner scelti da `auto`; su nexus solo sccache disk,s3, niente archivi).
           add() { # $1=os $2=arch $3=runner-json $4=apt [$5=setup $6=remote]
             case " $seen " in *" $1-$2 "*) return 0 ;; esac
             seen="$seen $1-$2"
@@ -286,7 +286,7 @@ jobs:
           }
           add_picked() { # $1=arch $2=runs_on $3=profile
             case "$3" in
-              nexus) add linux "$1" "$2" false self-hosted false ;;
+              nexus) add linux "$1" "$2" false self-hosted true ;;
               ohos) add linux "$1" "$2" false ohos true ;;
               *) add linux "$1" "$2" true ubicloud true ;;
             esac
@@ -358,7 +358,7 @@ jobs:
       # Registry e dipendenze git di cargo come archivio sul bucket S3 (build-kit/s3-cache) al
       # posto di rust-cache, solo con ohos e Ubicloud (matrix.remote su Linux); nexus e il runner
       # GitHub restano come prima. La target la copre sccache.
-      S3C: ${{ matrix.remote == true && matrix.os == 'linux' }}
+      S3C: ${{ matrix.remote == true && matrix.os == 'linux' && matrix.setup != 'self-hosted' }}
       S3C_ITEMS: cargo-registry|~/.cargo/registry ~/.cargo/git|**/Cargo.lock|rust-stable
     steps:
       - name: Notify start via Telegram
