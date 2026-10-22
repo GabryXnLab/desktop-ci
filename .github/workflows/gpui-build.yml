@@ -398,7 +398,7 @@ jobs:
 
       - name: Restore dependency archives (S3)
         if: ${{ env.S3C == 'true' }}
-        uses: GabryXnLab/build-kit/s3-cache@s3-cache
+        uses: GabryXnLab/build-kit/s3-cache@main
         with:
           mode: restore
           stack: desktop
@@ -506,7 +506,7 @@ jobs:
 
       - name: Save dependency archives (S3)
         if: ${{ success() && env.S3C == 'true' }}
-        uses: GabryXnLab/build-kit/s3-cache@s3-cache
+        uses: GabryXnLab/build-kit/s3-cache@main
         with:
           mode: save
           stack: desktop
