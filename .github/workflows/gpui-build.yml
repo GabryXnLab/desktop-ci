@@ -70,10 +70,15 @@ on:
         default: false
         type: boolean
       build_debug:
-        description: 'true → profilo dev (veloce, con debuginfo). false → profilo `dist` del progetto (LTO completo).'
+        description: 'true → profilo dev (veloce, con debuginfo). false → profilo di `build_profile`.'
         required: false
         default: false
         type: boolean
+      build_profile:
+        description: 'Profilo cargo con build_debug=false. Vuoto = `dist` (LTO fat, lento) con package/publish_release, `release` (LTO thin) per le altre build.'
+        required: false
+        default: ''
+        type: string
       has_submodules:
         description: 'true → checkout con submodules: recursive'
         required: false
@@ -427,13 +432,19 @@ jobs:
         env:
           CARGO_DIR: ${{ steps.tune.outputs.cargo_target_dir }}
           BUILD_DEBUG: ${{ inputs.build_debug }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          PACKAGE: ${{ inputs.package }}
           BIN: ${{ inputs.bin_name }}
           APP: ${{ inputs.app_name }}
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          if [ "$BUILD_DEBUG" = "true" ]; then profile=dev; outdir=debug; else profile=dist; outdir=dist; fi
+          if [ "$BUILD_DEBUG" = "true" ]; then profile=dev; outdir=debug
+          else
+            profile="${BUILD_PROFILE:-$([ "$PACKAGE" = "true" ] && echo dist || echo release)}"; outdir="$profile"
+          fi
+          echo "Profilo cargo: $profile"
           cargo build --locked --profile "$profile"
           target="${CARGO_DIR:-$GITHUB_WORKSPACE/${{ inputs.project_dir }}/target}"
           ext=""; [ "$OS" = "windows" ] && ext=".exe"
@@ -474,6 +485,7 @@ jobs:
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           BUILD_DEBUG: ${{ inputs.build_debug }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
         run: |
@@ -484,7 +496,7 @@ jobs:
             macos) formats=app,dmg ;;
           esac
           # cargo-packager cerca il binario in target/<profilo>: «debug» per il profilo dev.
-          profile=dist; [ "$BUILD_DEBUG" = "true" ] && profile=debug
+          profile="${BUILD_PROFILE:-dist}"; [ "$BUILD_DEBUG" = "true" ] && profile=debug
           args=(--profile "$profile" --formats "$formats")
           if [ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]; then
             # Una variabile vuota la leggerebbe come chiave: senza secret i pacchetti escono senza .sig.
