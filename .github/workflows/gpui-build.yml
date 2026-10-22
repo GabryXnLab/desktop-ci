@@ -109,6 +109,11 @@ on:
         required: false
         default: 'nexus,ohos,ubicloud'
         type: string
+      flake_dir:
+        description: 'Solo profilo ohos: cartella del flake (flake.nix, flake.lock) con il devShell Rust/GPUI, relativa alla radice del repo.'
+        required: false
+        default: '.'
+        type: string
       ubicloud_size:
         description: 'Solo runner_type=auto: vCPU di ubicloud-standard-<N>.'
         required: false
@@ -216,7 +221,7 @@ jobs:
       - name: Pick runner (linux-arm64)
         id: pick_arm64
         if: ${{ inputs.runner_type == 'auto' && steps.norm.outputs.arm64 == 'true' && inputs.linux_arm64_runner == '' }}
-        uses: GabryXnLab/build-kit/pick-runner@main
+        uses: GabryXnLab/build-kit/pick-runner@ohos-stack
         with:
           token: ${{ secrets.RUNNER_PICK_TOKEN }}
           repos: kagami-private,Riftgate,ascend
@@ -227,7 +232,7 @@ jobs:
       - name: Pick runner (linux-x64)
         id: pick_x64
         if: ${{ inputs.runner_type == 'auto' && steps.norm.outputs.x64 == 'true' && inputs.linux_x64_runner == '' }}
-        uses: GabryXnLab/build-kit/pick-runner@main
+        uses: GabryXnLab/build-kit/pick-runner@ohos-stack
         with:
           token: ${{ secrets.RUNNER_PICK_TOKEN }}
           repos: kagami-private,Riftgate,ascend
@@ -324,7 +329,7 @@ jobs:
 
       - name: Notify failure via Telegram
         if: ${{ failure() || cancelled() }}
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@ohos-stack
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -347,7 +352,7 @@ jobs:
     steps:
       - name: Notify start via Telegram
         id: started
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@ohos-stack
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -362,9 +367,17 @@ jobs:
           submodules: ${{ inputs.has_submodules && 'recursive' || 'false' }}
           token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
 
+      # ohos (NixOS): toolchain Rust e librerie di sistema di GPUI arrivano dal devShell del flake del
+      # progetto, non da rustup/apt.
+      - name: Nix devShell (ohos)
+        if: ${{ matrix.setup == 'ohos' }}
+        uses: GabryXnLab/build-kit/nix-env@ohos-stack
+        with:
+          flake_dir: ${{ inputs.flake_dir }}
+
       - name: Tune build
         id: tune
-        uses: GabryXnLab/build-kit/setup@main
+        uses: GabryXnLab/build-kit/setup@ohos-stack
         with:
           runner: ${{ matrix.setup }}
           max_workers: ${{ inputs.max_workers }}
@@ -374,6 +387,7 @@ jobs:
           cache_env: ${{ matrix.setup == 'ubicloud' && secrets.BUILD_CACHE_S3 || '' }}
 
       - name: Setup Rust
+        if: ${{ matrix.setup != 'ohos' }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cargo cache (GitHub runner)
@@ -498,7 +512,7 @@ jobs:
 
       - name: Notify via Telegram
         if: ${{ always() }}
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@ohos-stack
         with:
           message_id: ${{ steps.started.outputs.message_id }}
           run_inputs: ${{ toJSON(github.event.inputs) }}
@@ -526,7 +540,7 @@ jobs:
     steps:
       - name: Notify start via Telegram
         id: started
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@ohos-stack
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -626,7 +640,7 @@ jobs:
 
       - name: Notify via Telegram
         if: ${{ always() }}
-        uses: GabryXnLab/build-kit/notify@main
+        uses: GabryXnLab/build-kit/notify@ohos-stack
         with:
           message_id: ${{ steps.started.outputs.message_id }}
           run_inputs: ${{ toJSON(github.event.inputs) }}
