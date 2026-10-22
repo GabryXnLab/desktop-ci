@@ -221,7 +221,7 @@ jobs:
       - name: Pick runner (linux-arm64)
         id: pick_arm64
         if: ${{ inputs.runner_type == 'auto' && steps.norm.outputs.arm64 == 'true' && inputs.linux_arm64_runner == '' }}
-        uses: GabryXnLab/build-kit/pick-runner@ohos-stack
+        uses: GabryXnLab/build-kit/pick-runner@main
         with:
           token: ${{ secrets.RUNNER_PICK_TOKEN }}
           repos: kagami-private,Riftgate,ascend
@@ -232,7 +232,7 @@ jobs:
       - name: Pick runner (linux-x64)
         id: pick_x64
         if: ${{ inputs.runner_type == 'auto' && steps.norm.outputs.x64 == 'true' && inputs.linux_x64_runner == '' }}
-        uses: GabryXnLab/build-kit/pick-runner@ohos-stack
+        uses: GabryXnLab/build-kit/pick-runner@main
         with:
           token: ${{ secrets.RUNNER_PICK_TOKEN }}
           repos: kagami-private,Riftgate,ascend
@@ -329,7 +329,7 @@ jobs:
 
       - name: Notify failure via Telegram
         if: ${{ failure() || cancelled() }}
-        uses: GabryXnLab/build-kit/notify@ohos-stack
+        uses: GabryXnLab/build-kit/notify@main
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -352,7 +352,7 @@ jobs:
     steps:
       - name: Notify start via Telegram
         id: started
-        uses: GabryXnLab/build-kit/notify@ohos-stack
+        uses: GabryXnLab/build-kit/notify@main
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -371,13 +371,13 @@ jobs:
       # progetto, non da rustup/apt.
       - name: Nix devShell (ohos)
         if: ${{ matrix.setup == 'ohos' }}
-        uses: GabryXnLab/build-kit/nix-env@ohos-stack
+        uses: GabryXnLab/build-kit/nix-env@main
         with:
           flake_dir: ${{ inputs.flake_dir }}
 
       - name: Tune build
         id: tune
-        uses: GabryXnLab/build-kit/setup@ohos-stack
+        uses: GabryXnLab/build-kit/setup@main
         with:
           runner: ${{ matrix.setup }}
           max_workers: ${{ inputs.max_workers }}
@@ -512,7 +512,7 @@ jobs:
 
       - name: Notify via Telegram
         if: ${{ always() }}
-        uses: GabryXnLab/build-kit/notify@ohos-stack
+        uses: GabryXnLab/build-kit/notify@main
         with:
           message_id: ${{ steps.started.outputs.message_id }}
           run_inputs: ${{ toJSON(github.event.inputs) }}
@@ -540,7 +540,7 @@ jobs:
     steps:
       - name: Notify start via Telegram
         id: started
-        uses: GabryXnLab/build-kit/notify@ohos-stack
+        uses: GabryXnLab/build-kit/notify@main
         with:
           run_inputs: ${{ toJSON(github.event.inputs) }}
           bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -640,7 +640,7 @@ jobs:
 
       - name: Notify via Telegram
         if: ${{ always() }}
-        uses: GabryXnLab/build-kit/notify@ohos-stack
+        uses: GabryXnLab/build-kit/notify@main
         with:
           message_id: ${{ steps.started.outputs.message_id }}
           run_inputs: ${{ toJSON(github.event.inputs) }}

@@ -132,5 +132,6 @@ linux-arm64 = nexus-core o Ubicloud arm, linux-x64 = ohos o Ubicloud x64; window
 riga della matrix porta `setup` (valore di `runner` per `build-kit/setup`: self-hosted|ohos|ubicloud|github),
 `remote` (cache remota, solo runner scelti da `auto` fuori da nexus) e `selfhosted`; gli step non guardano
 più `runs-on` ma questi campi. `BUILD_CACHE_S3` arriva solo agli effimeri. `allow` e `ubicloud_size` sono
-input di prova/taratura. Il profilo ohos non ha ancora la toolchain Nix (fase 2b): una build su ohos manca di
-Rust/librerie. Le firme dell'updater sono già secret di repo (`TAURI_SIGNING_*`): nessun file di macchina.
+input di prova/taratura. Sul profilo ohos Rust e librerie di GPUI vengono dal devShell del flake del progetto (build-kit/nix-env,
+input flake_dir, default radice; dtolnay saltato); collaudato con Riftgate linux-x64. tauri-build.yml non ha auto
+e quindi non usa ohos. Le firme dell'updater sono già secret di repo (`TAURI_SIGNING_*`): nessun file di macchina.
