@@ -383,7 +383,7 @@ jobs:
 
       - name: Tune build
         id: tune
-        uses: GabryXnLab/build-kit/setup@build-veloci-f1
+        uses: GabryXnLab/build-kit/setup@main
         with:
           runner: ${{ matrix.setup }}
           max_workers: ${{ inputs.max_workers }}
@@ -398,7 +398,7 @@ jobs:
 
       - name: Restore dependency archives (S3)
         if: ${{ env.S3C == 'true' }}
-        uses: GabryXnLab/build-kit/s3-cache@build-veloci-f1
+        uses: GabryXnLab/build-kit/s3-cache@main
         with:
           mode: restore
           stack: desktop
@@ -506,7 +506,7 @@ jobs:
 
       - name: Save dependency archives (S3)
         if: ${{ success() && env.S3C == 'true' }}
-        uses: GabryXnLab/build-kit/s3-cache@build-veloci-f1
+        uses: GabryXnLab/build-kit/s3-cache@main
         with:
           mode: save
           stack: desktop
@@ -537,7 +537,7 @@ jobs:
 
       - name: Cache summary
         if: ${{ always() && matrix.os == 'linux' }}
-        uses: GabryXnLab/build-kit/summary@build-veloci-f1
+        uses: GabryXnLab/build-kit/summary@main
         with:
           token: ${{ secrets.RUNNER_PICK_TOKEN || github.token }}
           stack: desktop
