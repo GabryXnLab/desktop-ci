@@ -349,6 +349,12 @@ jobs:
       run:
         working-directory: ${{ inputs.project_dir }}
         shell: bash
+    env:
+      # Registry e dipendenze git di cargo come archivio sul bucket S3 (build-kit/s3-cache) al
+      # posto di rust-cache, solo con ohos e Ubicloud (matrix.remote su Linux); nexus e il runner
+      # GitHub restano come prima. La target la copre sccache.
+      S3C: ${{ matrix.remote == true && matrix.os == 'linux' }}
+      S3C_ITEMS: cargo-registry|~/.cargo/registry ~/.cargo/git|**/Cargo.lock|rust-stable
     steps:
       - name: Notify start via Telegram
         id: started
@@ -390,8 +396,18 @@ jobs:
         if: ${{ matrix.setup != 'ohos' }}
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Restore dependency archives (S3)
+        if: ${{ env.S3C == 'true' }}
+        uses: GabryXnLab/build-kit/s3-cache@s3-cache
+        with:
+          mode: restore
+          stack: desktop
+          items: ${{ env.S3C_ITEMS }}
+          cache_env: ${{ matrix.setup == 'ubicloud' && secrets.BUILD_CACHE_S3 || '' }}
+          clear_cache: ${{ inputs.clear_cache }}
+
       - name: Cargo cache (GitHub runner)
-        if: ${{ !matrix.selfhosted && inputs.clear_cache != true }}
+        if: ${{ !matrix.selfhosted && env.S3C != 'true' && inputs.clear_cache != true }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ inputs.project_dir }} -> target
@@ -487,6 +503,15 @@ jobs:
           find "$pkgdir" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
           ls -la "$pkgdir"
           echo "dir=$pkgdir" >> "$GITHUB_OUTPUT"
+
+      - name: Save dependency archives (S3)
+        if: ${{ success() && env.S3C == 'true' }}
+        uses: GabryXnLab/build-kit/s3-cache@s3-cache
+        with:
+          mode: save
+          stack: desktop
+          items: ${{ env.S3C_ITEMS }}
+          cache_env: ${{ matrix.setup == 'ubicloud' && secrets.BUILD_CACHE_S3 || '' }}
 
       # Bloccante solo quando lo scarica il job di pubblicazione (regola di build-kit).
       - name: Upload packages
